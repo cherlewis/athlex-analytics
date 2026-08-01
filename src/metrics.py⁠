@@ -1,0 +1,117 @@
+import numpy as np
+import pandas as pd
+from typing import Dict, Any
+
+class BiometricsCalculator:
+    """
+    Motor de cálculo para métricas avanzadas de carga interna (Frecuencia Cardíaca)
+    y carga externa (Potencia / Vatios) en deportes de resistencia.
+    """
+
+    def __init__(self, ftp: int = 250, max_hr: int = 190, rest_hr: int = 50, gender: str = "male"):
+        """
+        :param ftp: Umbral de Potencia Funcional (Functional Threshold Power) en W.
+        :param max_hr: Frecuencia cardíaca máxima del atleta.
+        :param rest_hr: Frecuencia cardíaca en reposo del atleta.
+        :param gender: 'male' o 'female' (utilizado para el coeficiente de ponderación TRIMP).
+        """
+        self.ftp = ftp
+        self.max_hr = max_hr
+        self.rest_hr = rest_hr
+        self.gender = gender.lower()
+
+    def calculate_normalized_power(self, power_series: pd.Series) -> float:
+        """
+        Calcula la Potencia Normalizada (NP) mediante un filtro móvil de 30 segundos
+        elevado a la cuarta potencia (Algoritmo de Andrew Coggan).
+        """
+        clean_power = power_series.fillna(0)
+        if len(clean_power) < 30:
+            return float(clean_power.mean())
+
+        # 1. Media móvil de 30 segundos
+        rolling_30s = clean_power.rolling(window=30, min_periods=1).mean()
+        
+        # 2. Elevar valores a la 4ª potencia, calcular media y extraer la raíz 4ª
+        np_value = (rolling_30s ** 4).mean() ** 0.25
+        return round(float(np_value), 1)
+
+    def calculate_intensity_factor(self, np_value: float) -> float:
+        """Calcula el Factor de Intensidad (IF = NP / FTP)."""
+        if self.ftp <= 0:
+            return 0.0
+        return round(float(np_value / self.ftp), 3)
+
+    def calculate_tss(self, duration_seconds: int, np_value: float, intensity_factor: float) -> float:
+        """
+        Calcula el Training Stress Score (TSS).
+        TSS = (segundos * NP * IF) / (FTP * 3600) * 100
+        """
+        if self.ftp <= 0:
+            return 0.0
+        tss = (duration_seconds * np_value * intensity_factor) / (self.ftp * 3600.0) * 100.0
+        return round(float(tss), 1)
+
+    def calculate_banister_trimp(self, hr_series: pd.Series, duration_seconds: int) -> float:
+        """
+        Calcula la Carga Interna Banister TRIMP (Training Impulse).
+        Pondera exponencialmente el incremento de la FC para reflejar el estrés cardiovascular.
+        """
+        clean_hr = hr_series[hr_series > 0]
+        if clean_hr.empty:
+            return 0.0
+
+        avg_hr = clean_hr.mean()
+        # Reserva del ritmo cardíaco (Heart Rate Reserve - HRR)
+        hr_reserve = (avg_hr - self.rest_hr) / (self.max_hr - self.rest_hr)
+        hr_reserve = np.clip(hr_reserve, 0, 1)
+
+        # Coeficiente según género (Banister et al.)
+        b_coeff = 1.92 if self.gender == "male" else 1.67
+        duration_minutes = duration_seconds / 60.0
+
+        trimp = duration_minutes * hr_reserve * 0.64 * np.exp(b_coeff * hr_reserve)
+        return round(float(trimp), 1)
+
+    def compute_full_summary(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Recibe el DataFrame extraído por el FitFileParser y retorna un diccionario
+        resumen con todas las métricas de rendimiento calculadas.
+        """
+        duration_sec = len(df) # Asumiendo frecuencia de muestreo 1Hz (1 punto/segundo)
+        avg_power = df['power'].mean() if 'power' in df.columns else 0
+        avg_hr = df['heart_rate'].mean() if 'heart_rate' in df.columns else 0
+
+        # Muestreo de potencia
+        np_val = self.calculate_normalized_power(df['power']) if 'power' in df.columns else 0.0
+        if_val = self.calculate_intensity_factor(np_val) if np_val > 0 else 0.0
+        tss_val = self.calculate_tss(duration_sec, np_val, if_val) if np_val > 0 else 0.0
+        
+        # Carga interna (Cardíaca)
+        trimp_val = self.calculate_banister_trimp(df['heart_rate'], duration_sec) if 'heart_rate' in df.columns else 0.0
+
+        return {
+            "duration_formatted": f"{duration_sec // 3600:02d}:{(duration_sec % 3600) // 60:02d}:{duration_sec % 60:02d}",
+            "avg_power_w": round(float(avg_power), 1),
+            "normalized_power_w": np_val,
+            "intensity_factor": if_val,
+            "tss": tss_val,
+            "avg_heart_rate": round(float(avg_hr), 1),
+            "trimp": trimp_val
+        }
+
+
+# --- Test Rápido ---
+if __name__ == "__main__":
+    # Simulación de datos para validar ecuaciones
+    sample_power = pd.Series(np.random.normal(230, 25, 3600)) # 1 hora de ciclismo
+    sample_hr = pd.Series(np.random.normal(155, 8, 3600))
+
+    calc = BiometricsCalculator(ftp=260, max_hr=188, rest_hr=48)
+    np_calc = calc.calculate_normalized_power(sample_power)
+    if_calc = calc.calculate_intensity_factor(np_calc)
+    tss_calc = calc.calculate_tss(3600, np_calc, if_calc)
+    trimp_calc = calc.calculate_banister_trimp(sample_hr, 3600)
+
+    print(f"--- Métricas Calculadas ---")
+    print(f"NP: {np_calc} W | IF: {if_calc} | TSS: {tss_calc} | TRIMP: {trimp_calc}")
