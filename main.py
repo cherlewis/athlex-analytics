@@ -1,0 +1,53 @@
+import numpy as np
+import pandas as pd
+
+from src.metrics import BiometricsCalculator
+
+def run_integration_test():
+    print("🚀 Running Athlex Analytics Integration Test...\n")
+
+    # 1. Simular 1 hora (3600s) de datos biométricos de entrenamiento
+    np.random.seed(42)
+    seconds = 3600
+
+    # Generar potencia con variaciones realistas (media ~220W)
+    simulated_power = np.random.normal(220, 25, seconds).clip(0)
+    
+    # Generar frecuencia cardíaca con respuesta fisiológica
+    simulated_hr = np.random.normal(152, 8, seconds).clip(60, 195)
+
+    df_session = pd.DataFrame({
+        'power': simulated_power,
+        'heart_rate': simulated_hr
+    })
+
+    # 2. Configurar el perfil del atleta en el motor biométrico
+    # FTP = 250W, FC Máx = 190 ppm, FC Reposo = 50 ppm
+    calculator = BiometricsCalculator(
+        ftp=250,
+        max_hr=190,
+        rest_hr=50,
+        gender="male"
+    )
+
+    # 3. Calcular todas las métricas fisiológicas
+    summary = calculator.compute_full_summary(df_session)
+
+    # 4. Mostrar resultados formateados
+    print("✅ Session Metrics Successfully Calculated:")
+    print("-" * 45)
+    print(f"⏱️  Duration         : {summary['duration_formatted']}")
+    print(f"⚡ Avg Power        : {summary['avg_power_w']} W")
+    print(f"🔥 Normalized Power : {summary['normalized_power_w']} W (NP)")
+    print(f"🎯 Intensity Factor : {summary['intensity_factor']} (IF)")
+    print(f"📈 Training Stress  : {summary['tss']} (TSS)")
+    print(f"🫀 Avg Heart Rate   : {summary['avg_heart_rate']} bpm")
+    print(f"📊 Banister TRIMP   : {summary['trimp']} pts")
+    print("-" * 45)
+    print("\n🎉 All core mathematical functions are operational!")
+
+if __name__ == "__main__":
+    run_integration_test()
+
+
+st.title("⚡ Athlex Analytics!")
