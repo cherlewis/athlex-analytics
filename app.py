@@ -1,10 +1,18 @@
-import streamlit as st
+from src.fit_parser import FitFileParser
+from src.metrics import BiometricsCalculator
 
-st.title("⚡ Athlex Analytics")
-st.write("¡Hola! Mi motor de analítica deportiva está conectado correctamente desde GitHub.")
+print("🚀 Probando el Pipeline Completo de Athlex Analytics...\n")
 
-# Un botón interactivo de prueba
-if st.button("Hacer clic para probar"):
-    st.success("¡Funciona perfectamente!")
+# 1. Parsear / Ingestar los datos de la actividad
+parser = FitFileParser()
+df_activity = parser.parse_to_dataframe()
 
-st.title("⚡ Athlex Analytics!")
+print(f"📊 Actividad cargada correctamente. Filas: {len(df_activity)}")
+
+# 2. Calcular métricas utilizando el motor biométrico
+calculator = BiometricsCalculator(ftp=250, max_hr=190, rest_hr=50)
+summary = calculator.compute_full_summary(df_activity)
+
+print("\n✅ Resumen de Rendimiento Obtenido:")
+for key, value in summary.items():
+    print(f"  • {key}: {value}")
