@@ -6,3 +6,5 @@ st.write("¡Hola! Mi motor de analítica deportiva está conectado correctamente
 # Un botón interactivo de prueba
 if st.button("Hacer clic para probar"):
     st.success("¡Funciona perfectamente!")
+
+st.title("⚡ Athlex Analytics!")
