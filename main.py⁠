@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+
 from src.metrics import BiometricsCalculator
 
 def run_integration_test():
