@@ -1,18 +1,26 @@
+import sys
+from pathlib import Path
+
+# Añadir la raíz del proyecto al path de Python para que encuentre 'src'
+root_path = Path(__file__).resolve().parent
+if str(root_path) not in sys.path:
+    sys.path.append(str(root_path))
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+# Ahora ya podemos importar sin fallos
 from src.fit_parser import FitFileParser
 from src.metrics import BiometricsCalculator
 
-print("🚀 Probando el Pipeline Completo de Athlex Analytics...\n")
+st.title("⚡ Athlex Analytics")
+st.write("¡Motor de analítica deportiva conectado correctamente!")
 
-# 1. Parsear / Ingestar los datos de la actividad
+# Prueba rápida del parser y métricas en la app
 parser = FitFileParser()
-df_activity = parser.parse_to_dataframe()
+df = parser.parse_to_dataframe()
+calc = BiometricsCalculator(ftp=250, max_hr=190, rest_hr=50)
+summary = calc.compute_full_summary(df)
 
-print(f"📊 Actividad cargada correctamente. Filas: {len(df_activity)}")
-
-# 2. Calcular métricas utilizando el motor biométrico
-calculator = BiometricsCalculator(ftp=250, max_hr=190, rest_hr=50)
-summary = calculator.compute_full_summary(df_activity)
-
-print("\n✅ Resumen de Rendimiento Obtenido:")
-for key, value in summary.items():
-    print(f"  • {key}: {value}")
+st.success(f"¡Actividad cargada con éxito! Duración: {summary['duration_formatted']} | TSS: {summary['tss']}")
