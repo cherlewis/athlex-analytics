@@ -28,7 +28,7 @@ def decodificar_fit(bytes_archivo):
     
     with fitdecode.FitReader(io.BytesIO(bytes_archivo)) as fit:
         for frame in fit:
-            # Comprobamos estrictamente que sea un bloque de datos
+            # Comprobamos estrictamente que sea un bloque de datos para evitar errores de cabecera
             if isinstance(frame, fitdecode.FitDataMessage):
                 if frame.name == 'session':
                     for field in frame.fields:
@@ -62,7 +62,7 @@ def procesar_telemetria(df, df_laps):
     df['Segundos_Transcurridos'] = (df['timestamp'] - inicio).dt.total_seconds()
     df['Minutos'] = df['Segundos_Transcurridos'] / 60.0
     
-    # Formato MM:SS para mostrar al pasar el ratón de forma amigable
+    # Formato MM:SS para mostrar al pasar el ratón
     df['Tiempo_Formato'] = df['Segundos_Transcurridos'].apply(
         lambda x: f"{int(x//60)}:{int(x%60):02d}" if pd.notna(x) else "0:00"
     )
@@ -70,11 +70,9 @@ def procesar_telemetria(df, df_laps):
     # 2. Conversión a Ritmo (min/km) y suavizado
     speed_col = 'enhanced_speed' if 'enhanced_speed' in df.columns else 'speed' if 'speed' in df.columns else None
     if speed_col:
-        # Evitamos dividir por velocidades muy bajas (caminata/parado)
         df['Ritmo_Crudo'] = np.where(df[speed_col] > 0.8, (1000 / df[speed_col]) / 60.0, np.nan)
         # Suavizamos el ritmo usando un promedio de los últimos 10 segundos
         df['Ritmo (min/km)'] = df['Ritmo_Crudo'].rolling(window=10, min_periods=1).mean()
-        # Formato visual del ritmo (Ej: 5.5 min/km -> 5:30)
         df['Ritmo_Formato'] = df['Ritmo (min/km)'].apply(
             lambda x: f"{int(x)}:{int((x-int(x))*60):02d}" if pd.notna(x) else "N/A"
         )
@@ -85,7 +83,6 @@ def procesar_telemetria(df, df_laps):
 
     # 4. Coordenadas para el Mapa
     if 'position_lat' in df.columns and 'position_long' in df.columns:
-        # Conversión matemática de semicírculos a grados decimales
         df['lat'] = df['position_lat'] * (180.0 / (2**31))
         df['lon'] = df['position_long'] * (180.0 / (2**31))
         
@@ -184,7 +181,23 @@ if archivos_subidos:
 
                     if 'lat' in df.columns and 'lon' in df.columns:
                         st.write("### 🗺️ Ruta GPS")
-                        st.map(df[['lat', 'lon']].dropna(), zoom=13)
+                        
+                        # Interruptor para mostrar u ocultar el mapa
+                        mostrar_mapa = st.toggle("Mostrar mapa en pantalla", value=True)
+                        
+                        if mostrar_mapa:
+                            df_mapa = df[['lat', 'lon']].dropna()
+                            if not df_mapa.empty:
+                                fig_map = px.line_mapbox(
+                                    df_mapa, lat="lat", lon="lon", 
+                                    zoom=13, height=400
+                                )
+                                fig_map.update_traces(line=dict(width=3, color='#FF4B4B'))
+                                fig_map.update_layout(
+                                    mapbox_style="open-street-map",
+                                    margin={"r":0, "t":0, "l":0, "b":0}
+                                )
+                                st.plotly_chart(fig_map, use_container_width=True)
 
                     st.write("### 📈 Telemetría de la Actividad")
                     
