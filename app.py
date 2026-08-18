@@ -1,6 +1,7 @@
-import streamlit as st
-import fitparse
+import io
+import fitdecode
 import pandas as pd
+import streamlit as st
 
 # Configuración de la interfaz visual
 st.set_page_config(
@@ -20,23 +21,28 @@ archivos_subidos = st.file_uploader(
 )
 
 def decodificar_fit(bytes_archivo):
-    """Parsea los datos binarios del archivo .fit a un resumen y una tabla de telemetría."""
-    fitfile = fitparse.FitFile(bytes_archivo)
-    
-    # Extraer resumen de sesión
+    """Parsea los datos binarios del archivo .fit usando fitdecode para mayor tolerancia."""
     resumen = {}
-    for record in fitfile.get_messages('session'):
-        for dato in record:
-            resumen[dato.name] = dato.value
-            
-    # Extraer puntos segundo a segundo
     puntos = []
-    for record in fitfile.get_messages('record'):
-        datos_punto = {}
-        for dato in record:
-            datos_punto[dato.name] = dato.value
-        puntos.append(datos_punto)
-        
+    
+    # Lectura del buffer de bytes en memoria con fitdecode
+    with fitdecode.FitReader(io.BytesIO(bytes_archivo)) as fit:
+        for frame in fit:
+            if isinstance(frame, fitdecode.FitDataMessage):
+                # Extraer datos de la sesión (totales)
+                if frame.name == 'session':
+                    for field in frame.fields:
+                        if field.name and field.value is not None:
+                            resumen[field.name] = field.value
+                # Extraer telemetría punto a punto (segundo a segundo)
+                elif frame.name == 'record':
+                    datos_punto = {}
+                    for field in frame.fields:
+                        if field.name and field.value is not None:
+                            datos_punto[field.name] = field.value
+                    if datos_punto:
+                        puntos.append(datos_punto)
+                        
     df = pd.DataFrame(puntos)
     return resumen, df
 
@@ -49,7 +55,7 @@ if archivos_subidos:
             contenido_bytes = archivo.read()
             resumen, df = decodificar_fit(contenido_bytes)
             
-            # Tarjetas de métricas
+            # Tarjetas de métricas principales
             col1, col2, col3, col4 = st.columns(4)
             
             distancia_km = (resumen.get('total_distance', 0) or 0) / 1000
@@ -70,6 +76,7 @@ if archivos_subidos:
                 st.write("### 📈 Telemetría de la Actividad")
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 
+                # Conversión de velocidad a km/h
                 if 'enhanced_speed' in df.columns:
                     df['Velocidad (km/h)'] = df['enhanced_speed'] * 3.6
                 elif 'speed' in df.columns:
@@ -81,7 +88,7 @@ if archivos_subidos:
                 if 'Velocidad (km/h)' in df.columns:
                     st.line_chart(df.set_index('timestamp')['Velocidad (km/h)'], title="Velocidad (km/h)")
             
-            # Exportación a CSV
+            # Botón de exportación a CSV
             csv_datos = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Descargar datos procesados en CSV",
