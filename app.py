@@ -28,7 +28,7 @@ def decodificar_fit(bytes_archivo):
     
     with fitdecode.FitReader(io.BytesIO(bytes_archivo)) as fit:
         for frame in fit:
-            if frame.is_data():
+            if isinstance(frame, fitdecode.FitDataMessage):
                 if frame.name == 'session':
                     for field in frame.fields:
                         if field.value is not None:
@@ -98,4 +98,4 @@ if archivos_subidos:
             
         except Exception as error:
             st.error(f"Error procesando '{archivo.name}': {error}")
-
+            
