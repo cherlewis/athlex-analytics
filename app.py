@@ -1,6 +1,8 @@
 import streamlit as st
 import fitdecode
 import pandas as pd
+import numpy as np
+import plotly.express as px
 import io
 
 st.set_page_config(
@@ -9,8 +11,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🏃 Analizador de Entrenamientos - COROS Pace 4")
-st.write("Sube uno o varios archivos `.fit` extraídos de tu COROS para visualizar métricas, gráficos interactivos y exportar a CSV.")
+st.title("🏃 Analizador Avanzado - COROS Pace 4")
+st.write("Visualiza métricas, compara entrenamientos y analiza tu ritmo y pulso.")
 
 archivos_subidos = st.file_uploader(
     "Arrastra o selecciona tus archivos .fit", 
@@ -19,15 +21,13 @@ archivos_subidos = st.file_uploader(
 )
 
 def decodificar_fit(bytes_archivo):
-    """
-    Decodifica un archivo .fit utilizando fitdecode para tolerar
-    campos personalizados o datos no estándar de COROS Pace 4.
-    """
+    """Extrae el resumen y los puntos de telemetría del archivo binario .FIT."""
     resumen = {}
     puntos = []
     
     with fitdecode.FitReader(io.BytesIO(bytes_archivo)) as fit:
         for frame in fit:
+            # Comprobamos estrictamente que sea un bloque de datos para evitar errores de cabecera
             if isinstance(frame, fitdecode.FitDataMessage):
                 if frame.name == 'session':
                     for field in frame.fields:
@@ -43,59 +43,151 @@ def decodificar_fit(bytes_archivo):
     df = pd.DataFrame(puntos)
     return resumen, df
 
-if archivos_subidos:
-    for archivo in archivos_subidos:
-        st.divider()
-        st.subheader(f"📁 Archivo: {archivo.name}")
+def procesar_telemetria(df):
+    """Limpia los datos, calcula el tiempo relativo, el ritmo y las coordenadas."""
+    if df.empty or 'timestamp' not in df.columns:
+        return df
         
-        try:
-            contenido_bytes = archivo.read()
-            resumen, df = decodificar_fit(contenido_bytes)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            distancia_m = resumen.get('total_distance', 0) or 0
-            distancia_km = distancia_m / 1000.0
-            col1.metric("Distancia Total", f"{distancia_km:.2f} km")
-            
-            duracion_seg = resumen.get('total_timer_time', 0) or 0
-            mins, segs = int(duracion_seg // 60), int(duracion_seg % 60)
-            col2.metric("Duración", f"{mins}m {segs}s")
-            
-            fc_prom = resumen.get('avg_heart_rate', 'N/A')
-            col3.metric("FC Promedio", f"{fc_prom} bpm" if fc_prom != 'N/A' else 'N/A')
-            
-            calorias = resumen.get('total_calories', 'N/A')
-            col4.metric("Calorías", f"{calorias} kcal" if calorias != 'N/A' else 'N/A')
-            
-            if not df.empty and 'timestamp' in df.columns:
-                st.write("### 📈 Telemetría de la Actividad")
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                
-                # Conversión de velocidad a km/h
-                if 'enhanced_speed' in df.columns:
-                    df['Velocidad (km/h)'] = df['enhanced_speed'] * 3.6
-                elif 'speed' in df.columns:
-                    df['Velocidad (km/h)'] = df['speed'] * 3.6
+    # 1. Tiempo relativo (Minutos desde el inicio en vez de hora absoluta)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    inicio = df['timestamp'].min()
+    df['Segundos_Transcurridos'] = (df['timestamp'] - inicio).dt.total_seconds()
+    df['Minutos'] = df['Segundos_Transcurridos'] / 60.0
+    
+    # Formato MM:SS para mostrar al pasar el ratón de forma amigable
+    df['Tiempo_Formato'] = df['Segundos_Transcurridos'].apply(
+        lambda x: f"{int(x//60)}:{int(x%60):02d}" if pd.notna(x) else "0:00"
+    )
 
-                # Gráfico de Frecuencia Cardíaca
-                if 'heart_rate' in df.columns:
-                    st.subheader("Frecuencia Cardíaca (bpm)")
-                    st.line_chart(df.set_index('timestamp')['heart_rate'])
+    # 2. Conversión a Ritmo (min/km) y suavizado para evitar saltos bruscos
+    speed_col = 'enhanced_speed' if 'enhanced_speed' in df.columns else 'speed' if 'speed' in df.columns else None
+    
+    if speed_col:
+        # 1000 / velocidad(m/s) / 60 = ritmo en min/km. Evitamos dividir por velocidades muy bajas (caminata/parado).
+        df['Ritmo_Crudo'] = np.where(df[speed_col] > 0.8, (1000 / df[speed_col]) / 60.0, np.nan)
+        # Suavizamos el ritmo usando un promedio de los últimos 10 segundos
+        df['Ritmo (min/km)'] = df['Ritmo_Crudo'].rolling(window=10, min_periods=1).mean()
+        
+        # Formato visual del ritmo (Ej: 5.5 min/km -> 5:30)
+        df['Ritmo_Formato'] = df['Ritmo (min/km)'].apply(
+            lambda x: f"{int(x)}:{int((x-int(x))*60):02d}" if pd.notna(x) else "N/A"
+        )
+
+    # 3. Coordenadas para el Mapa
+    if 'position_lat' in df.columns and 'position_long' in df.columns:
+        # Conversión matemática oficial del formato FIT (semicírculos a grados decimales)
+        df['lat'] = df['position_lat'] * (180.0 / (2**31))
+        df['lon'] = df['position_long'] * (180.0 / (2**31))
+        
+    return df
+
+if archivos_subidos:
+    # Si hay más de un archivo, damos la opción de superponer gráficos
+    modo_vista = "Individual"
+    if len(archivos_subidos) > 1:
+        st.divider()
+        modo_vista = st.radio(
+            "🔎 Opciones de visualización:", 
+            ["Ver individualmente (Métricas completas)", "Superponer entrenamientos (Comparación)"],
+            horizontal=True
+        )
+        
+    # --- MODO SUPERPOSICIÓN (COMPARACIÓN) ---
+    if "Superponer" in modo_vista:
+        st.subheader("📊 Comparativa de Entrenamientos")
+        todos_los_datos = []
+        
+        for archivo in archivos_subidos:
+            contenido_bytes = archivo.read()
+            _, df = decodificar_fit(contenido_bytes)
+            df = procesar_telemetria(df)
+            if not df.empty:
+                df['Archivo'] = archivo.name # Añadimos el nombre para diferenciar colores en la leyenda
+                todos_los_datos.append(df)
+                
+        if todos_los_datos:
+            df_global = pd.concat(todos_los_datos, ignore_index=True)
+            
+            # Gráfico de Pulso Comparado
+            if 'heart_rate' in df_global.columns:
+                fig_hr = px.line(df_global, x='Minutos', y='heart_rate', color='Archivo',
+                                 title="Comparativa: Frecuencia Cardíaca (bpm)",
+                                 labels={'Minutos': 'Tiempo de Actividad (min)', 'heart_rate': 'Pulsaciones (bpm)'},
+                                 hover_data={'Minutos': False, 'Tiempo_Formato': True, 'heart_rate': True})
+                st.plotly_chart(fig_hr, use_container_width=True)
+                
+            # Gráfico de Ritmo Comparado
+            if 'Ritmo (min/km)' in df_global.columns:
+                fig_pace = px.line(df_global, x='Minutos', y='Ritmo (min/km)', color='Archivo',
+                                   title="Comparativa: Ritmo (min/km)",
+                                   labels={'Minutos': 'Tiempo de Actividad (min)', 'Ritmo (min/km)': 'Ritmo'},
+                                   hover_data={'Minutos': False, 'Tiempo_Formato': True, 'Ritmo (min/km)': False, 'Ritmo_Formato': True})
+                # ¡Invertimos el eje Y para que los ritmos rápidos (números bajos) estén arriba!
+                fig_pace.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig_pace, use_container_width=True)
+
+    # --- MODO INDIVIDUAL (POR DEFECTO) ---
+    else:
+        for archivo in archivos_subidos:
+            st.divider()
+            st.subheader(f"📁 Archivo: {archivo.name}")
+            
+            try:
+                contenido_bytes = archivo.read()
+                resumen, df = decodificar_fit(contenido_bytes)
+                df = procesar_telemetria(df)
+                
+                # Tarjetas de Métricas Resumen
+                col1, col2, col3, col4 = st.columns(4)
+                
+                distancia_km = (resumen.get('total_distance', 0) or 0) / 1000.0
+                col1.metric("Distancia Total", f"{distancia_km:.2f} km")
+                
+                duracion_seg = resumen.get('total_timer_time', 0) or 0
+                col2.metric("Duración", f"{int(duracion_seg // 60)}m {int(duracion_seg % 60)}s")
+                
+                fc_prom = resumen.get('avg_heart_rate', 'N/A')
+                col3.metric("FC Promedio", f"{fc_prom} bpm" if fc_prom != 'N/A' else 'N/A')
+                
+                calorias = resumen.get('total_calories', 'N/A')
+                col4.metric("Calorías", f"{calorias} kcal" if calorias != 'N/A' else 'N/A')
+                
+                if not df.empty:
+                    # 1. Trazado del Mapa (Si hay GPS)
+                    if 'lat' in df.columns and 'lon' in df.columns:
+                        st.write("### 🗺️ Ruta GPS")
+                        st.map(df[['lat', 'lon']].dropna(), zoom=13)
+
+                    st.write("### 📈 Telemetría de la Actividad")
                     
-                # Gráfico de Velocidad
-                if 'Velocidad (km/h)' in df.columns:
-                    st.subheader("Velocidad (km/h)")
-                    st.line_chart(df.set_index('timestamp')['Velocidad (km/h)'])
-            
-            csv_datos = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Descargar datos procesados en CSV",
-                data=csv_datos,
-                file_name=f"{archivo.name}_telemetria.csv",
-                mime="text/csv"
-            )
-            
-        except Exception as error:
-            st.error(f"Error procesando '{archivo.name}': {error}")
-            
+                    # 2. Gráfico interactivo de Pulso
+                    if 'heart_rate' in df.columns:
+                        fig_hr = px.line(df, x='Minutos', y='heart_rate',
+                                         title="Frecuencia Cardíaca (bpm)",
+                                         labels={'Minutos': 'Tiempo (min)', 'heart_rate': 'Pulsaciones (bpm)'},
+                                         hover_data={'Minutos': False, 'Tiempo_Formato': True, 'heart_rate': True})
+                        fig_hr.update_traces(line_color='#FF4B4B') # Color rojo para el corazón
+                        st.plotly_chart(fig_hr, use_container_width=True)
+                        
+                    # 3. Gráfico interactivo de Ritmo (Invertido)
+                    if 'Ritmo (min/km)' in df.columns:
+                        fig_pace = px.line(df, x='Minutos', y='Ritmo (min/km)',
+                                           title="Ritmo Suavizado (min/km)",
+                                           labels={'Minutos': 'Tiempo (min)'},
+                                           hover_data={'Minutos': False, 'Tiempo_Formato': True, 'Ritmo (min/km)': False, 'Ritmo_Formato': True})
+                        fig_pace.update_traces(line_color='#1E90FF') # Color azul para la velocidad
+                        fig_pace.update_yaxes(autorange="reversed") # Los rápidos arriba
+                        st.plotly_chart(fig_pace, use_container_width=True)
+                
+                # Descarga a CSV
+                csv_datos = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar telemetría en CSV",
+                    data=csv_datos,
+                    file_name=f"{archivo.name}_analisis.csv",
+                    mime="text/csv"
+                )
+                
+            except Exception as error:
+                st.error(f"Error procesando '{archivo.name}': {error}")
+
