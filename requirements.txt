@@ -1,3 +1,5 @@
 fitdecode
 pandas
 streamlit
+plotly
+numpy
