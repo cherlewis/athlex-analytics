@@ -56,8 +56,15 @@ def procesar_telemetria(df, df_laps):
     if df.empty or 'timestamp' not in df.columns:
         return df, df_laps
         
-    # 1. Tiempo relativo (Minutos desde el inicio en vez de hora absoluta)
+    # 1. Tiempo relativo y Zona Horaria
     df['timestamp'] = pd.to_datetime(df['timestamp'])
+    
+    # Convertimos a hora de Madrid (España)
+    if df['timestamp'].dt.tz is None:
+        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Europe/Madrid')
+    else:
+        df['timestamp'] = df['timestamp'].dt.tz_convert('Europe/Madrid')
+        
     inicio = df['timestamp'].min()
     df['Segundos_Transcurridos'] = (df['timestamp'] - inicio).dt.total_seconds()
     df['Minutos'] = df['Segundos_Transcurridos'] / 60.0
@@ -89,6 +96,13 @@ def procesar_telemetria(df, df_laps):
     # 5. Procesando los tiempos de las fases (vueltas/laps)
     if not df_laps.empty and 'timestamp' in df_laps.columns:
         df_laps['timestamp'] = pd.to_datetime(df_laps['timestamp'])
+        
+        # Convertimos a hora de Madrid para las fases
+        if df_laps['timestamp'].dt.tz is None:
+            df_laps['timestamp'] = df_laps['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Europe/Madrid')
+        else:
+            df_laps['timestamp'] = df_laps['timestamp'].dt.tz_convert('Europe/Madrid')
+            
         df_laps['Minutos'] = (df_laps['timestamp'] - inicio).dt.total_seconds() / 60.0
         
     return df, df_laps
@@ -141,14 +155,20 @@ if archivos_subidos:
                 resumen, df, df_laps = decodificar_fit(contenido_bytes)
                 df, df_laps = procesar_telemetria(df, df_laps)
                 
-                # Creación del título dinámico (Deporte + Fecha)
+                # Creación del título dinámico con zona horaria de Madrid
                 deporte = str(resumen.get('sport', 'Actividad')).capitalize()
                 fecha_inicio = resumen.get('start_time')
                 try:
-                    fecha_formateada = pd.to_datetime(fecha_inicio).strftime('%d/%m/%Y %H:%M')
+                    fecha_dt = pd.to_datetime(fecha_inicio)
+                    # Convertimos la fecha de inicio a Madrid
+                    if fecha_dt.tzinfo is None:
+                        fecha_dt = fecha_dt.tz_localize('UTC').tz_convert('Europe/Madrid')
+                    else:
+                        fecha_dt = fecha_dt.tz_convert('Europe/Madrid')
+                    fecha_formateada = fecha_dt.strftime('%d/%m/%Y %H:%M')
                     titulo = f"🏃 {deporte} - {fecha_formateada}"
                 except:
-                    titulo = f"🏃 Actividad de COROS"
+                    titulo = f"🏃 {deporte} de COROS"
                     
                 st.subheader(f"{titulo}")
                 st.caption(f"Archivo original: {archivo.name}")
@@ -183,7 +203,7 @@ if archivos_subidos:
                         st.write("### 🗺️ Ruta GPS")
                         
                         # Interruptor para mostrar u ocultar el mapa
-                        mostrar_mapa = st.toggle("Mostrar mapa en pantalla", value=True)
+                        mostrar_mapa = st.toggle("Mostrar mapa en pantalla", value=True, key=f"mapa_{archivo.name}")
                         
                         if mostrar_mapa:
                             df_mapa = df[['lat', 'lon']].dropna()
@@ -235,9 +255,9 @@ if archivos_subidos:
                     label="📥 Descargar telemetría en CSV",
                     data=csv_datos,
                     file_name=f"{deporte}_telemetria.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    key=f"btn_{archivo.name}"
                 )
                 
             except Exception as error:
                 st.error(f"Error procesando '{archivo.name}': {error}")
-
