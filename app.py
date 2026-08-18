@@ -73,7 +73,12 @@ def procesar_telemetria(df):
             lambda x: f"{int(x)}:{int((x-int(x))*60):02d}" if pd.notna(x) else "N/A"
         )
 
-    # 3. Coordenadas para el Mapa
+    # 3. Suavizado de Frecuencia Cardíaca
+    if 'heart_rate' in df.columns:
+        # Aplicamos una media móvil de 10 segundos para limpiar ruido del sensor
+        df['heart_rate'] = df['heart_rate'].rolling(window=10, min_periods=1).mean()
+
+    # 4. Coordenadas para el Mapa
     if 'position_lat' in df.columns and 'position_long' in df.columns:
         # Conversión matemática oficial del formato FIT (semicírculos a grados decimales)
         df['lat'] = df['position_lat'] * (180.0 / (2**31))
