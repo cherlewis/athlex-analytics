@@ -24,7 +24,7 @@ def decodificar_fit(bytes_archivo):
     """Extrae el resumen y los puntos de telemetría del archivo binario .FIT."""
     resumen = {}
     puntos = []
-    
+    laps = []    
     with fitdecode.FitReader(io.BytesIO(bytes_archivo)) as fit:
         for frame in fit:
             # Comprobamos estrictamente que sea un bloque de datos para evitar errores de cabecera
@@ -39,14 +39,20 @@ def decodificar_fit(bytes_archivo):
                         if field.value is not None:
                             datos_punto[field.name] = field.value
                     puntos.append(datos_punto)
+                elif frame.name == 'lap':                    datos_lap = {}
+                    for field in frame.fields:
+                        if field.value is not None:
+                            datos_lap[field.name] = field.value
+                    laps.append(datos_lap)
                     
     df = pd.DataFrame(puntos)
-    return resumen, df
+    df_laps = pd.DataFrame(laps)
+    return resumen, df, df_laps
 
-def procesar_telemetria(df):
+def procesar_telemetria(df, df_laps):
     """Limpia los datos, calcula el tiempo relativo, el ritmo y las coordenadas."""
     if df.empty or 'timestamp' not in df.columns:
-        return df
+        return df, df_laps
         
     # 1. Tiempo relativo (Minutos desde el inicio en vez de hora absoluta)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -84,7 +90,13 @@ def procesar_telemetria(df):
         df['lat'] = df['position_lat'] * (180.0 / (2**31))
         df['lon'] = df['position_long'] * (180.0 / (2**31))
         
-    return df
+    # 5. STREAMING_CHUNK: Procesando los tiempos de las fases para las gráficas
+    if not df_laps.empty and 'timestamp' in df_laps.columns:
+        df_laps['timestamp'] = pd.to_datetime(df_laps['timestamp'])
+        # Calculamos en qué minuto relativo terminó cada fase para pintarlo en la gráfica
+        df_laps['Minutos'] = (df_laps['timestamp'] - inicio).dt.total_seconds() / 60.0
+        
+    return df, df_laps
 
 if archivos_subidos:
     # Si hay más de un archivo, damos la opción de superponer gráficos
@@ -104,8 +116,8 @@ if archivos_subidos:
         
         for archivo in archivos_subidos:
             contenido_bytes = archivo.read()
-            _, df = decodificar_fit(contenido_bytes)
-            df = procesar_telemetria(df)
+            resumen, df, df_laps = decodificar_fit(contenido_bytes)
+            df, df_laps = procesar_telemetria(df, df_laps)
             if not df.empty:
                 df['Archivo'] = archivo.name # Añadimos el nombre para diferenciar colores en la leyenda
                 todos_los_datos.append(df)
@@ -135,15 +147,24 @@ if archivos_subidos:
     else:
         for archivo in archivos_subidos:
             st.divider()
-            st.subheader(f"📁 Archivo: {archivo.name}")
             
             try:
                 contenido_bytes = archivo.read()
-                resumen, df = decodificar_fit(contenido_bytes)
-                df = procesar_telemetria(df)
+                resumen, df, df_laps = decodificar_fit(contenido_bytes)
+                df, df_laps = procesar_telemetria(df, df_laps)
+                
+                deporte = str(resumen.get('sport', 'Actividad')).capitalize()
+                fecha_inicio = resumen.get('start_time')
+                try:
+                    fecha_formateada = pd.to_datetime(fecha_inicio).strftime('%d/%m/%Y %H:%M')
+                    titulo = f"🏃 {deporte} - {fecha_formateada}"
+                except:
+                    titulo = f"🏃 Actividad de COROS"
+                    
+                st.subheader(f"{titulo} (Archivo original: {archivo.name})")
                 
                 # Tarjetas de Métricas Resumen
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 
                 distancia_km = (resumen.get('total_distance', 0) or 0) / 1000.0
                 col1.metric("Distancia Total", f"{distancia_km:.2f} km")
@@ -157,7 +178,16 @@ if archivos_subidos:
                 calorias = resumen.get('total_calories', 'N/A')
                 col4.metric("Calorías", f"{calorias} kcal" if calorias != 'N/A' else 'N/A')
                 
+                temp_prom = resumen.get('avg_temperature', 'N/A')
+                col5.metric("Temp. Media", f"{temp_prom} °C" if temp_prom != 'N/A' else 'N/A')
+                
                 if not df.empty:
+                    def dibujar_fases(figura):
+                        if not df_laps.empty and 'Minutos' in df_laps.columns:
+                            for min_lap in df_laps['Minutos']:
+                                figura.add_vline(x=min_lap, line_width=1.5, line_dash="dash", line_color="gray", opacity=0.6)
+                        return figura
+
                     # 1. Trazado del Mapa (Si hay GPS)
                     if 'lat' in df.columns and 'lon' in df.columns:
                         st.write("### 🗺️ Ruta GPS")
@@ -172,6 +202,7 @@ if archivos_subidos:
                                          labels={'Minutos': 'Tiempo (min)', 'heart_rate': 'Pulsaciones (bpm)'},
                                          hover_data={'Minutos': False, 'Tiempo_Formato': True, 'heart_rate': True})
                         fig_hr.update_traces(line_color='#FF4B4B') # Color rojo para el corazón
+                        fig_hr = dibujar_fases(fig_hr) # Añadimos las líneas de fases
                         st.plotly_chart(fig_hr, use_container_width=True)
                         
                     # 3. Gráfico interactivo de Ritmo (Invertido)
@@ -182,7 +213,18 @@ if archivos_subidos:
                                            hover_data={'Minutos': False, 'Tiempo_Formato': True, 'Ritmo (min/km)': False, 'Ritmo_Formato': True})
                         fig_pace.update_traces(line_color='#1E90FF') # Color azul para la velocidad
                         fig_pace.update_yaxes(autorange="reversed") # Los rápidos arriba
+                        fig_pace = dibujar_fases(fig_pace) # Añadimos las líneas de fases
                         st.plotly_chart(fig_pace, use_container_width=True)
+                        
+                    # 4. STREAMING_CHUNK: Gráfico interactivo de Temperatura
+                    if 'temperature' in df.columns:
+                        fig_temp = px.line(df, x='Minutos', y='temperature',
+                                           title="Temperatura a lo largo de la ruta (°C)",
+                                           labels={'Minutos': 'Tiempo (min)', 'temperature': 'Temp (°C)'},
+                                           hover_data={'Minutos': False, 'Tiempo_Formato': True, 'temperature': True})
+                        fig_temp.update_traces(line_color='#FFA500') # Naranja para la temperatura
+                        fig_temp = dibujar_fases(fig_temp) # Añadimos las líneas de fases
+                        st.plotly_chart(fig_temp, use_container_width=True)
                 
                 # Descarga a CSV
                 csv_datos = df.to_csv(index=False).encode('utf-8')
