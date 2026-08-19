@@ -344,9 +344,14 @@ if uploaded_files:
                 for v_seg in vueltas_tiempos:
                     fig.add_vline(x=v_seg, line_width=1, line_dash="dash", line_color="gray")
 
-                # Layout eje Y invertido para ritmo
+                # Layout eje Y invertido para ritmo con marcas de tiempo seguras
+                step = max(1, len(df) // 8)
                 fig.update_layout(
-                    xaxis=dict(title="Tiempo de Actividad", tickval=df['Tiempo_Segundos'][::len(df)//8], ticktext=df['Tiempo_Formato'][::len(df)//8]),
+                    xaxis=dict(
+                        title="Tiempo de Actividad", 
+                        tickvals=df['Tiempo_Segundos'].iloc[::step], 
+                        ticktext=df['Tiempo_Formato'].iloc[::step]
+                    ),
                     yaxis=dict(title="Ritmo (min/km)", autorange="reversed"),
                     yaxis2=dict(title="FC (ppm)", overlaying='y', side='right'),
                     hovermode="x unified", legend=dict(orientation="h", y=1.1)
@@ -498,4 +503,3 @@ if uploaded_files:
                         
                         respuesta_ia = consultar_gemini_coach(prompt)
                         st.markdown(f"```\n{respuesta_ia}\n```")
-
