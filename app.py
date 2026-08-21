@@ -36,7 +36,7 @@ def parse_sport_name(sport_val):
     return s_str.capitalize()
 
 def parse_swim_stroke(stroke_val):
-    """Convierte el tipo de estilo de nado FIT a texto legibles en español."""
+    """Convierte el tipo de estilo de nado FIT a texto legible en español."""
     if stroke_val is None:
         return "Libre / Crawl"
     if isinstance(stroke_val, int):
@@ -96,13 +96,10 @@ def procesar_telemetria(df, es_natacion=False):
         df['speed_kmh'] = df['speed'] * 3.6
         
         if es_natacion:
-            # Ritmo en min/100m = (100m / velocidad m/s) / 60
             df['ritmo_decimal'] = np.where(df['speed'] > 0.05, 1.66667 / df['speed'], np.nan)
         else:
-            # Ritmo en min/km = (1000m / velocidad m/s) / 60
             df['ritmo_decimal'] = np.where(df['speed'] > 0.5, 16.6667 / df['speed'], np.nan)
         
-        # Suavizado de ritmo (Ventana de 10 muestras)
         df['ritmo_suavizado'] = df['ritmo_decimal'].rolling(window=10, min_periods=1).mean()
         
         def decimal_a_ritmo_texto(val):
@@ -134,7 +131,7 @@ def procesar_telemetria(df, es_natacion=False):
     # 6. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
     if 'cadence' in df.columns:
         if es_natacion:
-            df['cadence_spm'] = df['cadence'] # Brazadas por minuto
+            df['cadence_spm'] = df['cadence']
         else:
             df['cadence_spm'] = np.where(df['cadence'] < 120, df['cadence'] * 2, df['cadence'])
 
@@ -163,7 +160,6 @@ def leer_fichero_fit(file_bytes, file_name):
     with fitdecode.FitReader(file_bytes) as fit:
         for frame in fit:
             if isinstance(frame, fitdecode.FitDataMessage):
-                # Sesión General
                 if frame.name == 'session':
                     for field in frame.fields:
                         if field.name == 'sport' and field.value is not None:
@@ -175,7 +171,6 @@ def leer_fichero_fit(file_bytes, file_name):
                         elif field.name == 'total_elapsed_time' and field.value:
                             metadata['duracion_total'] = field.value
                         elif field.name == 'total_distance' and field.value:
-                            # Distancia en metros para natación, en km para el resto
                             metadata['distancia_total'] = field.value
                         elif field.name == 'total_calories' and field.value:
                             metadata['calorias_totales'] = field.value
@@ -188,7 +183,6 @@ def leer_fichero_fit(file_bytes, file_name):
                         elif field.name == 'num_lengths' and field.value:
                             metadata['largos_totales'] = field.value
 
-                # Vueltas / Fases (Laps)
                 elif frame.name == 'lap':
                     lap_data = {}
                     for field in frame.fields:
@@ -196,7 +190,6 @@ def leer_fichero_fit(file_bytes, file_name):
                             lap_data[field.name] = field.value
                     laps.append(lap_data)
 
-                # Largos de Piscina (Length)
                 elif frame.name == 'length':
                     len_data = {}
                     for field in frame.fields:
@@ -204,7 +197,6 @@ def leer_fichero_fit(file_bytes, file_name):
                             len_data[field.name] = field.value
                     lengths.append(len_data)
 
-                # Telemetría continua (Record)
                 elif frame.name == 'record':
                     data = {}
                     for field in frame.fields:
@@ -221,9 +213,8 @@ def leer_fichero_fit(file_bytes, file_name):
     df_laps = pd.DataFrame(laps)
     df_lengths = pd.DataFrame(lengths)
     
-    # Ajuste de unidad de distancia en metadatos
     if not metadata['es_natacion']:
-        metadata['distancia_total'] = metadata['distancia_total'] / 1000.0 # Convertir m a km en carrera/bici
+        metadata['distancia_total'] = metadata['distancia_total'] / 1000.0
 
     return df_records, df_laps, df_lengths, metadata
 
@@ -232,8 +223,8 @@ def leer_fichero_fit(file_bytes, file_name):
 # -----------------------------------------------------------------------------
 
 def calcular_factor_eficiencia(df, es_natacion=False):
-    """Calcula el Efficiency Factor (EF) adaptado a Carrera o Natación."""
-    if 'speed' not in df.columns or 'heart_rate' not in df.columns:
+    """Calcula el Efficiency Factor (EF) = Velocidad (m/min) / FC Promedio."""
+    if df.empty or 'speed' not in df.columns or 'heart_rate' not in df.columns:
         return None, None
     
     min_vel = 0.05 if es_natacion else 0.5
@@ -252,8 +243,8 @@ def calcular_factor_eficiencia(df, es_natacion=False):
     df_h1 = df_val.iloc[:mitad]
     df_h2 = df_val.iloc[mitad:]
     
-    ef_h1 = (df_h1['speed'].mean() * 60) / df_h1['heart_rate'].mean() if not df_h1.empty else 0
-    ef_h2 = (df_h2['speed'].mean() * 60) / df_h2['heart_rate'].mean() if not df_h2.empty else 0
+    ef_h1 = (df_h1['speed'].mean() * 60) / df_h1['heart_rate'].mean() if not df_h1.empty and df_h1['heart_rate'].mean() > 0 else 0
+    ef_h2 = (df_h2['speed'].mean() * 60) / df_h2['heart_rate'].mean() if not df_h2.empty and df_h2['heart_rate'].mean() > 0 else 0
     
     deriva_porcentaje = ((ef_h1 - ef_h2) / ef_h1) * 100 if ef_h1 > 0 else 0
     
@@ -277,12 +268,11 @@ def diagnosticar_comparativa(data1, data2):
         elif diff_ef > 2.0:
             diagnosticos.append(f"🎉 **Mejora de Eficiencia:** Tu Factor de Eficiencia ($EF$) subió un **{diff_ef:.1f}%**. ¡Mayor eficiencia metabólica!")
 
-    # SWOLF en Natación
     swolf1, swolf2 = meta1.get('swolf_medio'), meta2.get('swolf_medio')
     if swolf1 and swolf2:
         diff_swolf = swolf2 - swolf1
         if diff_swolf >= 2:
-            diagnosticos.append(f"🏊 **Empeoramiento de SWOLF (+{diff_swolf} ptos):** Necesitaste más tiempo o más brazadas por largo. Tu técnica o agarre en el agua fue menos eficaz.")
+            diagnosticos.append(f"🏊 **Empeoramiento de SWOLF (+{diff_swolf} ptos):** Necesitaste más tiempo o más brazadas por largo. Tu técnica fue menos eficaz.")
         elif diff_swolf <= -2:
             diagnosticos.append(f"🏊 **Mejora de SWOLF ({diff_swolf} ptos):** ¡Excelente técnica! Has nadado más deslizante reduciendo tiempo/brazadas.")
 
@@ -291,7 +281,7 @@ def diagnosticar_comparativa(data1, data2):
     if temp1 is not None and temp2 is not None:
         diff_temp = temp2 - temp1
         if abs(diff_temp) >= 2.5:
-            diagnosticos.append(f"🌡️ **Diferencia Térmica ({diff_temp:+.1f}°C):** Cambios de temperatura del agua o ambiente afectan al gasto cardíaco.")
+            diagnosticos.append(f"🌡️ **Diferencia Térmica ({diff_temp:+.1f}°C):** Cambios de temperatura afectan al gasto cardíaco.")
 
     if drift2 is not None and drift2 > 5.0:
         diagnosticos.append(f"🔥 **Desacople Aeróbico Elevado ({drift2}%):** En la 2ª mitad del entrenamiento tu pulso subió en relación al ritmo.")
@@ -364,6 +354,9 @@ if uploaded_files:
             lengths = sel['lengths']
             es_nat = meta['es_natacion']
 
+            # Cálculo de Eficiencia para la sesión individual
+            ef_valor, drift_valor = calcular_factor_eficiencia(df, es_natacion=es_nat)
+
             # Indicador de Deporte
             if es_nat:
                 st.info("🏊 **Actividad de Natación Detectada:** Las métricas y gráficos se han adaptado automáticamente a **min/100m**, **SWOLF** y **brazadas**.")
@@ -381,15 +374,14 @@ if uploaded_files:
             dur_segs = int(meta['duracion_total'] % 60)
             col2.metric("Duración", f"{dur_mins}m {dur_segs}s")
             col3.metric("FC Promedio", f"{int(meta['fc_media'])} ppm" if meta['fc_media'] else "N/A")
-            col4.metric("Calorías", f"{int(meta['calorias_totales'])} kcal")
+            col4.metric("EF (Eficiencia)", f"{ef_valor}" if ef_valor is not None else "N/A", help="Factor de Eficiencia: Velocidad (m/min) / FC Media")
             
             if es_nat:
                 col5.metric("SWOLF Medio", f"{meta['swolf_medio']}" if meta['swolf_medio'] else "N/A")
                 col6.metric("Largos Totales", f"{meta['largos_totales']}" if meta['largos_totales'] else "N/A")
             else:
-                col5.metric("Temperatura", f"{meta['temperatura_media']} °C" if meta['temperatura_media'] is not None else "N/A")
-                lpk_medio = int(df['latidos_por_km'].mean()) if 'latidos_por_km' in df.columns and not df['latidos_por_km'].isna().all() else "N/A"
-                col6.metric("Coste Cardíaco", f"{lpk_medio} lat/km" if lpk_medio != "N/A" else "N/A")
+                col5.metric("Calorías", f"{int(meta['calorias_totales'])} kcal")
+                col6.metric("Temperatura", f"{meta['temperatura_media']} °C" if meta['temperatura_media'] is not None else "N/A")
 
             # Marcadores de Vueltas (Laps)
             vueltas_tiempos = []
@@ -440,23 +432,52 @@ if uploaded_files:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Cadencia de Pasos/Brazadas & Altitud
-            if not df.empty and ('cadence_spm' in df.columns or 'altitude' in df.columns):
-                col_g1, col_g2 = st.columns(2)
-                with col_g1:
-                    if 'cadence_spm' in df.columns and not df['cadence_spm'].isna().all():
-                        lbl_cad = "🏊 Cadencia de Brazadas (br/min)" if es_nat else "👟 Cadencia de Zancada (ppm)"
-                        st.subheader(lbl_cad)
-                        fig_cad = px.line(df, x='Tiempo_Segundos', y='cadence_spm', color_discrete_sequence=['#AB63FA'])
-                        fig_cad.update_layout(xaxis_title="Tiempo", yaxis_title="Frecuencia")
-                        st.plotly_chart(fig_cad, use_container_width=True)
+            # RELACIÓN RITMO - FRECUENCIA CARDÍACA (Coste Cardíaco & Dispersión)
+            if not es_nat and 'latidos_por_km_suavizado' in df.columns:
+                st.markdown("---")
+                st.subheader("❤️⚡ Relación Ritmo / Frecuencia Cardíaca (Eficiencia en Carrera)")
                 
-                with col_g2:
-                    if not es_nat and 'altitude' in df.columns and not df['altitude'].isna().all():
-                        st.subheader("🏔️ Perfil de Altitud (m)")
-                        fig_alt = px.area(df, x='Tiempo_Segundos', y='altitude', color_discrete_sequence=['#636EFA'])
-                        fig_alt.update_layout(xaxis_title="Tiempo", yaxis_title="Altitud (m)")
-                        st.plotly_chart(fig_alt, use_container_width=True)
+                col_ef1, col_ef2 = st.columns(2)
+                
+                with col_ef1:
+                    st.markdown("**Coste Cardíaco en el Tiempo (Latidos por Kilómetro)**")
+                    fig_lpk = go.Figure()
+                    fig_lpk.add_trace(go.Scatter(
+                        x=df['Tiempo_Segundos'], y=df['latidos_por_km_suavizado'],
+                        mode='lines', name='Coste (latidos/km)',
+                        line=dict(color='#FFA15A', width=2),
+                        hovertemplate="Coste: %{y:.0f} latidos/km<extra></extra>"
+                    ))
+                    for v_seg in vueltas_tiempos:
+                        fig_lpk.add_vline(x=v_seg, line_width=1, line_dash="dash", line_color="gray")
+                    fig_lpk.update_layout(
+                        xaxis=dict(title="Tiempo", tickvals=tick_vals, ticktext=tick_texts),
+                        yaxis=dict(title="Latidos consumidos / km"),
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_lpk, use_container_width=True)
+
+                with col_ef2:
+                    st.markdown("**Dispersión: Ritmo vs Frecuencia Cardíaca**")
+                    df_scatter = df.dropna(subset=['ritmo_suavizado', 'heart_rate'])
+                    df_scatter = df_scatter[(df_scatter['ritmo_suavizado'] >= 3.0) & (df_scatter['ritmo_suavizado'] <= 12.0)]
+                    
+                    fig_scat = px.scatter(
+                        df_scatter, x='heart_rate', y='ritmo_suavizado',
+                        color='Tiempo_Segundos',
+                        labels={'heart_rate': 'Frecuencia Cardíaca (ppm)', 'ritmo_suavizado': 'Ritmo (min/km)', 'Tiempo_Segundos': 'Segundos'},
+                        color_continuous_scale='Viridis'
+                    )
+                    fig_scat.update_layout(yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_scat, use_container_width=True)
+
+            # Cadencia de Pasos/Brazadas
+            if not df.empty and 'cadence_spm' in df.columns and not df['cadence_spm'].isna().all():
+                lbl_cad = "🏊 Cadencia de Brazadas (br/min)" if es_nat else "👟 Cadencia de Zancada (ppm)"
+                st.subheader(lbl_cad)
+                fig_cad = px.line(df, x='Tiempo_Segundos', y='cadence_spm', color_discrete_sequence=['#AB63FA'])
+                fig_cad.update_layout(xaxis_title="Tiempo", yaxis_title="Frecuencia")
+                st.plotly_chart(fig_cad, use_container_width=True)
 
             # Mapa GPS Ocultable (Solo si hay coordenadas de exterior)
             if 'lat' in df.columns and 'lon' in df.columns and not df['lat'].dropna().empty:
@@ -592,3 +613,4 @@ if uploaded_files:
                         
                         respuesta_ia = consultar_gemini_coach(prompt)
                         st.markdown(f"```\n{respuesta_ia}\n```")
+                        
