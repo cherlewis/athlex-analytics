@@ -91,7 +91,14 @@ def procesar_telemetria(df, es_natacion=False):
             
         df['Tiempo_Formato'] = df['Tiempo_Segundos'].apply(formato_tiempo)
 
-    # 2. Cálculo de Velocidad y Ritmo (Diferenciando Natación min/100m vs Carrera min/km)
+    # 2. Distancia acumulada continua (si existe)
+    if 'distance' in df.columns:
+        if es_natacion:
+            df['distancia_acum_m'] = df['distance']
+        else:
+            df['distancia_acum_km'] = df['distance'] / 1000.0
+
+    # 3. Cálculo de Velocidad y Ritmo (Diferenciando Natación min/100m vs Carrera min/km)
     if 'speed' in df.columns:
         df['speed_kmh'] = df['speed'] * 3.6
         
@@ -111,24 +118,24 @@ def procesar_telemetria(df, es_natacion=False):
             
         df['Ritmo_Texto'] = df['ritmo_suavizado'].apply(decimal_a_ritmo_texto)
 
-    # 3. Frecuencia Cardíaca (Suavizada)
+    # 4. Frecuencia Cardíaca (Suavizada)
     if 'heart_rate' in df.columns:
         df['heart_rate_raw'] = df['heart_rate']
         df['heart_rate'] = df['heart_rate'].rolling(window=5, min_periods=1).mean()
 
-    # 4. Relación Ritmo y FC / Coste Cardíaco
+    # 5. Relación Ritmo y FC / Coste Cardíaco
     if 'ritmo_suavizado' in df.columns and 'heart_rate' in df.columns:
         df['latidos_por_km'] = df['heart_rate'] * df['ritmo_suavizado']
         df['latidos_por_km_suavizado'] = df['latidos_por_km'].rolling(window=15, min_periods=1).mean()
 
-    # 5. Coordenadas GPS (Solo si existen)
+    # 6. Coordenadas GPS (Solo si existen)
     if 'position_lat' in df.columns and 'position_long' in df.columns:
         df_valid_gps = df.dropna(subset=['position_lat', 'position_long'])
         if not df_valid_gps.empty:
             df['lat'] = df['position_lat'] * (180 / 2**31)
             df['lon'] = df['position_long'] * (180 / 2**31)
 
-    # 6. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
+    # 7. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
     if 'cadence' in df.columns:
         if es_natacion:
             df['cadence_spm'] = df['cadence']
@@ -513,36 +520,123 @@ if uploaded_files:
                 st.dataframe(df_laps_show, use_container_width=True)
 
         # =====================================================================
-        # PESTAÑA 2: COMPARATIVA MULTI-SESIÓN
+        # PESTAÑA 2: COMPARATIVA MULTI-SESIÓN CON ALINEACIÓN MANUAL
         # =====================================================================
         with tab_comp:
-            st.subheader("🔀 Superposición de Entrenamientos")
+            st.subheader("🔀 Superposición y Alineación Manual de Entrenamientos")
             if len(datos_cargados) < 2:
                 st.info("Sube 2 o más archivos .FIT para poder compararlos en la misma gráfica.")
             else:
-                fig_comp_ritmo = go.Figure()
-                fig_comp_fc = go.Figure()
+                # Selector de métrica y eje X
+                col_m, col_e = st.columns(2)
+                with col_m:
+                    metrica_comp = st.radio(
+                        "Métrica a visualizar:",
+                        ["Frecuencia Cardíaca (ppm)", "Ritmo", "Cadencia", "Coste Cardíaco (Latidos/km)"],
+                        horizontal=True
+                    )
+                with col_e:
+                    eje_x_tipo = st.radio(
+                        "Eje Horizontal (X):",
+                        ["Tiempo de Actividad", "Distancia Recorrida"],
+                        horizontal=True
+                    )
+
+                st.markdown("#### 🎚️ Ajuste Manual de Alineación (Offset / Desfase)")
+                st.caption("Usa los controles deslizantes para mover horizontalmente cada sesión y alinear las series de intervalos o calentamientos.")
+
+                # Generar sliders de desfase por cada archivo
+                offsets = {}
+                cols_offsets = st.columns(min(len(datos_cargados), 4))
+                for i, d in enumerate(datos_cargados):
+                    col_target = cols_offsets[i % 4]
+                    nom_act = d['meta']['fecha_inicio'].strftime('%d/%m %H:%M') if d['meta']['fecha_inicio'] else d['meta']['nombre_archivo']
+                    with col_target:
+                        offsets[i] = st.slider(
+                            f"Desfase: {nom_act}",
+                            min_value=-900,
+                            max_value=900,
+                            value=0,
+                            step=5,
+                            format="%d s",
+                            key=f"slider_off_{i}"
+                        )
+
+                # Construir Gráfica Comparativa con Desfase
+                fig_comp = go.Figure()
+                autorange_rev = False
 
                 for i, d in enumerate(datos_cargados):
-                    nombre = d['meta']['fecha_inicio'].strftime('%d/%m %H:%M') if d['meta']['fecha_inicio'] else d['meta']['nombre_archivo']
-                    lbl_nat = " (Piscina)" if d['meta']['es_natacion'] else ""
-                    
-                    if 'ritmo_suavizado' in d['df'].columns and not d['df']['ritmo_suavizado'].isna().all():
-                        fig_comp_ritmo.add_trace(go.Scatter(
-                            x=d['df']['Tiempo_Segundos'], y=d['df']['ritmo_suavizado'],
-                            mode='lines', name=f"Ritmo{lbl_nat}: {nombre}"
-                        ))
-                    if 'heart_rate' in d['df'].columns and not d['df']['heart_rate'].isna().all():
-                        fig_comp_fc.add_trace(go.Scatter(
-                            x=d['df']['Tiempo_Segundos'], y=d['df']['heart_rate'],
-                            mode='lines', name=f"FC: {nombre}"
+                    df_c = d['df'].copy()
+                    if df_c.empty:
+                        continue
+
+                    nom_act = d['meta']['fecha_inicio'].strftime('%d/%m %H:%M') if d['meta']['fecha_inicio'] else d['meta']['nombre_archivo']
+                    off_sec = offsets[i]
+
+                    # Preparar Eje X (Tiempo con desfase o Distancia)
+                    if eje_x_tipo == "Tiempo de Actividad":
+                        x_vals = df_c['Tiempo_Segundos'] + off_sec
+                        x_title = "Tiempo (segundos con desfase manual)"
+                        
+                        # Formato para el bocadillo emergente (hover)
+                        def format_s(s):
+                            prefix = "-" if s < 0 else ""
+                            abs_s = abs(s)
+                            return f"{prefix}{int(abs_s//60)}m {int(abs_s%60)}s"
+                            
+                        x_hover = x_vals.apply(format_s)
+                    else:
+                        if 'distancia_acum_km' in df_c.columns:
+                            x_vals = df_c['distancia_acum_km']
+                            x_title = "Distancia (km)"
+                        elif 'distancia_acum_m' in df_c.columns:
+                            x_vals = df_c['distancia_acum_m']
+                            x_title = "Distancia (m)"
+                        else:
+                            x_vals = df_c['Tiempo_Segundos']
+                            x_title = "Tiempo"
+                        x_hover = x_vals.round(2).astype(str)
+
+                    # Selector de Y_vals
+                    y_vals = None
+                    y_title = metrica_comp
+
+                    if metrica_comp == "Frecuencia Cardíaca (ppm)" and 'heart_rate' in df_c.columns:
+                        y_vals = df_c['heart_rate']
+                    elif metrica_comp == "Ritmo" and 'ritmo_suavizado' in df_c.columns:
+                        y_vals = df_c['ritmo_suavizado']
+                        autorange_rev = True
+                        y_title = "Ritmo (min/100m)" if d['meta']['es_natacion'] else "Ritmo (min/km)"
+                    elif metrica_comp == "Cadencia" and 'cadence_spm' in df_c.columns:
+                        y_vals = df_c['cadence_spm']
+                        y_title = "Brazadas/min" if d['meta']['es_natacion'] else "Pasos/min"
+                    elif metrica_comp == "Coste Cardíaco (Latidos/km)" and 'latidos_por_km_suavizado' in df_c.columns:
+                        y_vals = df_c['latidos_por_km_suavizado']
+
+                    if y_vals is not None and not y_vals.isna().all():
+                        str_off = f" ({off_sec:+}s)" if off_sec != 0 else ""
+                        fig_comp.add_trace(go.Scatter(
+                            x=x_vals,
+                            y=y_vals,
+                            mode='lines',
+                            name=f"{nom_act}{str_off}",
+                            customdata=x_hover,
+                            hovertemplate=f"<b>{nom_act}</b><br>X: %{{customdata}}<br>{y_title}: %{{y:.1f}}<extra></extra>"
                         ))
 
-                fig_comp_ritmo.update_layout(title="Comparativa de Ritmos", yaxis=dict(autorange="reversed"))
-                fig_comp_fc.update_layout(title="Comparativa de Pulsaciones (ppm)")
+                fig_comp.update_layout(
+                    title=f"Comparativa Superpuesta: {metrica_comp}",
+                    xaxis_title=x_title,
+                    yaxis_title=y_title,
+                    hovermode="x unified",
+                    legend=dict(orientation="h", y=1.1)
+                )
 
-                st.plotly_chart(fig_comp_ritmo, use_container_width=True)
-                st.plotly_chart(fig_comp_fc, use_container_width=True)
+                if autorange_rev:
+                    fig_comp.update_layout(yaxis=dict(autorange="reversed"))
+
+                st.plotly_chart(fig_comp, use_container_width=True)
 
         # =====================================================================
         # PESTAÑA 3: DIAGNÓSTICO DE EFICIENCIA E IA COACH
