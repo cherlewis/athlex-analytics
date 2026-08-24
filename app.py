@@ -11,13 +11,9 @@ import json
 import time
 
 # Configuración de página
-st.set_page_config(page_title="COROS Pace 4 Analytics", layout="wide", page_icon="🏊")
+st.set_page_config(page_title="COROS Pace 4 Analytics", layout="wide", page_icon="🏃")
 
 st.title("🏃🏊 COROS Pace 4 - Analizador de Atletismo & Natación")
-
-# -----------------------------------------------------------------------------
-# DICCIONARIOS Y PARSERS DE NATACIÓN Y DEPORTES FIT
-# -----------------------------------------------------------------------------
 
 def parse_sport_name(sport_val):
     """Mapea códigos numéricos o texto del protocolo FIT al nombre del deporte."""
@@ -62,10 +58,6 @@ def convert_to_madrid_time(dt):
         dt = pytz.utc.localize(dt)
     return dt.astimezone(pytz.timezone('Europe/Madrid'))
 
-# -----------------------------------------------------------------------------
-# FUNCIONES DE PROCESAMIENTO DE TELEMETRÍA Y FIT
-# -----------------------------------------------------------------------------
-
 def procesar_telemetria(df, es_natacion=False):
     """Limpia, convierte unidades y calcula métricas según el deporte (Carrera vs Natación)."""
     df = df.copy()
@@ -91,7 +83,7 @@ def procesar_telemetria(df, es_natacion=False):
             
         df['Tiempo_Formato'] = df['Tiempo_Segundos'].apply(formato_tiempo)
 
-    # 2. Distancia acumulada continua (si existe)
+    # 2. Distancia acumulada continua
     if 'distance' in df.columns:
         if es_natacion:
             df['distancia_acum_m'] = df['distance']
@@ -128,14 +120,19 @@ def procesar_telemetria(df, es_natacion=False):
         df['latidos_por_km'] = df['heart_rate'] * df['ritmo_suavizado']
         df['latidos_por_km_suavizado'] = df['latidos_por_km'].rolling(window=15, min_periods=1).mean()
 
-    # 6. Coordenadas GPS (Solo si existen)
+    # 6. Potencia de Carrera (Running Power)
+    if 'power' in df.columns:
+        df['power_raw'] = df['power']
+        df['power_suavizado'] = df['power'].rolling(window=5, min_periods=1).mean()
+
+    # 7. Coordenadas GPS
     if 'position_lat' in df.columns and 'position_long' in df.columns:
         df_valid_gps = df.dropna(subset=['position_lat', 'position_long'])
         if not df_valid_gps.empty:
             df['lat'] = df['position_lat'] * (180 / 2**31)
             df['lon'] = df['position_long'] * (180 / 2**31)
 
-    # 7. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
+    # 8. Cadencia
     if 'cadence' in df.columns:
         if es_natacion:
             df['cadence_spm'] = df['cadence']
@@ -145,7 +142,7 @@ def procesar_telemetria(df, es_natacion=False):
     return df
 
 def leer_fichero_fit(file_bytes, file_name):
-    """Extrae records, laps, lengths y metadatos con soporte completo para Natación."""
+    """Extrae records, laps, lengths y metadatos con soporte completo para Natación y Potencia."""
     records = []
     laps = []
     lengths = []
@@ -161,6 +158,7 @@ def leer_fichero_fit(file_bytes, file_name):
         'temperatura_media': None,
         'swolf_medio': None,
         'largos_totales': 0,
+        'potencia_media': None,
         'estilo_principal': 'Libre / Crawl'
     }
     
@@ -189,6 +187,8 @@ def leer_fichero_fit(file_bytes, file_name):
                             metadata['swolf_medio'] = field.value
                         elif field.name == 'num_lengths' and field.value:
                             metadata['largos_totales'] = field.value
+                        elif field.name == 'avg_power' and field.value:
+                            metadata['potencia_media'] = field.value
 
                 elif frame.name == 'lap':
                     lap_data = {}
@@ -225,9 +225,64 @@ def leer_fichero_fit(file_bytes, file_name):
 
     return df_records, df_laps, df_lengths, metadata
 
-# -----------------------------------------------------------------------------
-# CÁLCULOS FISIOLÓGICOS Y DIAGNÓSTICO
-# -----------------------------------------------------------------------------
+def obtener_metricas_run_filtradas(df, laps, meta):
+    """Calcula métricas promedio exclusivas para las fases principales de Carrera (Run)."""
+    df_run = pd.DataFrame()
+    
+    if not df.empty:
+        if 'sport' in df.columns:
+            mask = df['sport'].astype(str).str.lower().str.contains('run|carrera') | (df['sport'] == 1)
+            df_run = df[mask]
+        
+        # Si no hay columna de deporte o no filtró nada, usar la actividad entera si es Carrera
+        if df_run.empty and not meta.get('es_natacion', False):
+            df_run = df.copy()
+
+    # Considerar solo puntos con movimiento (> 0.5 m/s)
+    if not df_run.empty and 'speed' in df_run.columns:
+        df_run_activa = df_run[df_run['speed'] > 0.5]
+        if not df_run_activa.empty:
+            df_run = df_run_activa
+
+    # 1. Avg Pace
+    pace_str = "N/A"
+    if not df_run.empty and 'speed' in df_run.columns:
+        avg_speed = df_run['speed'].mean()
+        if avg_speed > 0.5:
+            pace_dec = 16.6667 / avg_speed
+            mins = int(pace_dec)
+            segs = int((pace_dec - mins) * 60)
+            pace_str = f"{mins}:{segs:02d} /km"
+
+    # 2. FC Promedio (Run)
+    fc_prom_str = "N/A"
+    if not df_run.empty and 'heart_rate' in df_run.columns:
+        hr_val = df_run['heart_rate'].dropna().mean()
+        if not pd.isna(hr_val) and hr_val > 0:
+            fc_prom_str = f"{int(hr_val)} ppm"
+    elif meta.get('fc_media'):
+        fc_prom_str = f"{int(meta['fc_media'])} ppm"
+
+    # 3. Coste Cardíaco (Run) = FC x Ritmo decimal (lat/km)
+    coste_run_str = "N/A"
+    if not df_run.empty and 'speed' in df_run.columns and 'heart_rate' in df_run.columns:
+        avg_speed = df_run['speed'].mean()
+        avg_hr = df_run['heart_rate'].dropna().mean()
+        if avg_speed > 0.5 and not pd.isna(avg_hr) and avg_hr > 0:
+            pace_dec = 16.6667 / avg_speed
+            coste_val = int(avg_hr * pace_dec)
+            coste_run_str = f"{coste_val} lat/km"
+
+    # 4. Running Power (W)
+    power_run_str = "N/A"
+    if not df_run.empty and 'power' in df_run.columns:
+        pow_val = df_run['power'].dropna().mean()
+        if not pd.isna(pow_val) and pow_val > 0:
+            power_run_str = f"{int(pow_val)} W"
+    elif meta.get('potencia_media'):
+        power_run_str = f"{int(meta['potencia_media'])} W"
+
+    return pace_str, fc_prom_str, coste_run_str, power_run_str
 
 def calcular_factor_eficiencia(df, es_natacion=False):
     """Calcula el Efficiency Factor (EF) = Velocidad (m/min) / FC Promedio."""
@@ -324,10 +379,6 @@ def consultar_gemini_coach(prompt_texto):
         time.sleep(delay)
     return "Error al conectar con el servidor del Entrenador IA. Inténtalo de nuevo más tarde."
 
-# -----------------------------------------------------------------------------
-# INTERFAZ PRINCIPAL DE STREAMLIT
-# -----------------------------------------------------------------------------
-
 uploaded_files = st.file_uploader("Arrastra aquí tus archivos .FIT de COROS (Carrera, Bici o Natación)", type=["fit"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -347,9 +398,6 @@ if uploaded_files:
         
         tab_ind, tab_comp, tab_diag = st.tabs(["📊 Sesión Individual", "📈 Comparativa Superpuesta", "🧠 Diagnóstico e IA Coach"])
 
-        # =====================================================================
-        # PESTAÑA 1: ANÁLISIS INDIVIDUAL
-        # =====================================================================
         with tab_ind:
             opciones = [f"{'🏊' if d['meta']['es_natacion'] else '🏃'} {d['meta']['deporte']} - {d['meta']['fecha_inicio'].strftime('%d/%m/%Y %H:%M') if d['meta']['fecha_inicio'] else d['meta']['nombre_archivo']}" for d in datos_cargados]
             idx_sel = st.selectbox("Selecciona la actividad a inspeccionar:", range(len(opciones)), format_func=lambda x: opciones[x])
@@ -361,36 +409,40 @@ if uploaded_files:
             lengths = sel['lengths']
             es_nat = meta['es_natacion']
 
-            # Cálculo de Eficiencia para la sesión individual
+            # Cálculos de Eficiencia y Métricas Filtradas de Run
             ef_valor, drift_valor = calcular_factor_eficiencia(df, es_natacion=es_nat)
+            pace_run_str, fc_run_str, coste_run_str, power_run_str = obtener_metricas_run_filtradas(df, laps, meta)
 
-            # Indicador de Deporte
             if es_nat:
-                st.info("🏊 **Actividad de Natación Detectada:** Las métricas y gráficos se han adaptado automáticamente a **min/100m**, **SWOLF** y **brazadas**.")
-            
-            # Métricas Clave
+                st.info("🏊 **Actividad de Natación Detectada:** Métricas adaptadas a piscina (min/100m, SWOLF, Largos).")
+
             st.markdown(f"### 📍 {meta['deporte']} - {meta['fecha_inicio'].strftime('%d de %B, %Y a las %H:%M') if meta['fecha_inicio'] else ''}")
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
             
+            # --- PANEL DE LAS 9 MÉTRICAS EN 3 FILAS ORGANIZADAS ---
+            # Fila 1: Distancia | Duración | Avg. Pace (Run)
+            r1_col1, r1_col2, r1_col3 = st.columns(3)
             if es_nat:
-                col1.metric("Distancia", f"{int(meta['distancia_total'])} m")
+                r1_col1.metric("Distancia", f"{int(meta['distancia_total'])} m")
             else:
-                col1.metric("Distancia", f"{meta['distancia_total']:.2f} km")
+                r1_col1.metric("Distancia", f"{meta['distancia_total']:.2f} km")
                 
             dur_mins = int(meta['duracion_total'] // 60)
             dur_segs = int(meta['duracion_total'] % 60)
-            col2.metric("Duración", f"{dur_mins}m {dur_segs}s")
-            col3.metric("FC Promedio", f"{int(meta['fc_media'])} ppm" if meta['fc_media'] else "N/A")
-            col4.metric("EF (Eficiencia)", f"{ef_valor}" if ef_valor is not None else "N/A", help="Factor de Eficiencia: Velocidad (m/min) / FC Media")
-            
-            if es_nat:
-                col5.metric("SWOLF Medio", f"{meta['swolf_medio']}" if meta['swolf_medio'] else "N/A")
-                col6.metric("Largos Totales", f"{meta['largos_totales']}" if meta['largos_totales'] else "N/A")
-            else:
-                col5.metric("Calorías", f"{int(meta['calorias_totales'])} kcal")
-                col6.metric("Temperatura", f"{meta['temperatura_media']} °C" if meta['temperatura_media'] is not None else "N/A")
+            r1_col2.metric("Duración", f"{dur_mins}m {dur_segs}s")
+            r1_col3.metric("Avg. Pace (Run)", pace_run_str, help="Ritmo medio exclusivo de las fases principales de Carrera")
 
-            # Marcadores de Vueltas (Laps)
+            # Fila 2: FC Promedio (Run) | EF (Eficiencia) | Coste Cardíaco (Run)
+            r2_col1, r2_col2, r2_col3 = st.columns(3)
+            r2_col1.metric("FC Promedio (Run)", fc_run_str, help="Pulsaciones medias en la sesión principal de Carrera")
+            r2_col2.metric("EF (Eficiencia)", f"{ef_valor}" if ef_valor is not None else "N/A", help="Factor de Eficiencia: Velocidad (m/min) / FC Media")
+            r2_col3.metric("Coste Cardíaco (Run)", coste_run_str, help="Latidos consumidos por km en la sesión de Carrera")
+
+            # Fila 3: Running Power (Run) | Calorías | Temperatura
+            r3_col1, r3_col2, r3_col3 = st.columns(3)
+            r3_col1.metric("Running Power (Run)", power_run_str, help="Potencia media de carrera en Vatios (W)")
+            r3_col2.metric("Calorías", f"{int(meta['calorias_totales'])} kcal" if meta['calorias_totales'] else "N/A")
+            r3_col3.metric("Temperatura", f"{meta['temperatura_media']} °C" if meta['temperatura_media'] is not None else "N/A")
+
             vueltas_tiempos = []
             if not laps.empty and 'start_time' in laps.columns and not df.empty and 'timestamp' in df.columns:
                 inicio_act = df['timestamp'].iloc[0]
@@ -439,7 +491,6 @@ if uploaded_files:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            # RELACIÓN RITMO - FRECUENCIA CARDÍACA (Coste Cardíaco & Dispersión)
             if not es_nat and 'latidos_por_km_suavizado' in df.columns:
                 st.markdown("---")
                 st.subheader("❤️⚡ Relación Ritmo / Frecuencia Cardíaca (Eficiencia en Carrera)")
@@ -486,7 +537,7 @@ if uploaded_files:
                 fig_cad.update_layout(xaxis_title="Tiempo", yaxis_title="Frecuencia")
                 st.plotly_chart(fig_cad, use_container_width=True)
 
-            # Mapa GPS Ocultable (Solo si hay coordenadas de exterior)
+            # Mapa GPS Ocultable
             if 'lat' in df.columns and 'lon' in df.columns and not df['lat'].dropna().empty:
                 st.subheader("🗺️ Trazado de Ruta GPS")
                 if st.toggle("Mostrar Mapa de Ruta", value=True, key=f"tog_map_{idx_sel}"):
@@ -496,7 +547,7 @@ if uploaded_files:
                     fig_map.update_layout(mapbox_style="open-street-map", margin={"r":0,"t":0,"l":0,"b":0})
                     st.plotly_chart(fig_map, use_container_width=True)
 
-            # Tabla de Vueltas / Desglose por Km o Largos
+            # Tabla de Vueltas / Intervalos
             if not laps.empty:
                 st.subheader("⏱️ Desglose por Vueltas / Intervalos")
                 cols_mostrar = [c for c in ['lap_index', 'total_elapsed_time', 'total_distance', 'avg_speed', 'avg_heart_rate', 'avg_swolf'] if c in laps.columns]
@@ -519,20 +570,16 @@ if uploaded_files:
                         )
                 st.dataframe(df_laps_show, use_container_width=True)
 
-        # =====================================================================
-        # PESTAÑA 2: COMPARATIVA MULTI-SESIÓN CON ALINEACIÓN MANUAL
-        # =====================================================================
         with tab_comp:
             st.subheader("🔀 Superposición y Alineación Manual de Entrenamientos")
             if len(datos_cargados) < 2:
                 st.info("Sube 2 o más archivos .FIT para poder compararlos en la misma gráfica.")
             else:
-                # Selector de métrica y eje X
                 col_m, col_e = st.columns(2)
                 with col_m:
                     metrica_comp = st.radio(
                         "Métrica a visualizar:",
-                        ["Frecuencia Cardíaca (ppm)", "Ritmo", "Cadencia", "Coste Cardíaco (Latidos/km)"],
+                        ["Frecuencia Cardíaca (ppm)", "Ritmo", "Cadencia", "Coste Cardíaco (Latidos/km)", "Factor de Eficiencia (EF)"],
                         horizontal=True
                     )
                 with col_e:
@@ -545,7 +592,6 @@ if uploaded_files:
                 st.markdown("#### 🎚️ Ajuste Manual de Alineación (Offset / Desfase)")
                 st.caption("Usa los controles deslizantes para mover horizontalmente cada sesión y alinear las series de intervalos o calentamientos.")
 
-                # Generar sliders de desfase por cada archivo
                 offsets = {}
                 cols_offsets = st.columns(min(len(datos_cargados), 4))
                 for i, d in enumerate(datos_cargados):
@@ -562,7 +608,6 @@ if uploaded_files:
                             key=f"slider_off_{i}"
                         )
 
-                # Construir Gráfica Comparativa con Desfase
                 fig_comp = go.Figure()
                 autorange_rev = False
 
@@ -574,12 +619,10 @@ if uploaded_files:
                     nom_act = d['meta']['fecha_inicio'].strftime('%d/%m %H:%M') if d['meta']['fecha_inicio'] else d['meta']['nombre_archivo']
                     off_sec = offsets[i]
 
-                    # Preparar Eje X (Tiempo con desfase o Distancia)
                     if eje_x_tipo == "Tiempo de Actividad":
                         x_vals = df_c['Tiempo_Segundos'] + off_sec
                         x_title = "Tiempo (segundos con desfase manual)"
                         
-                        # Formato para el bocadillo emergente (hover)
                         def format_s(s):
                             prefix = "-" if s < 0 else ""
                             abs_s = abs(s)
@@ -598,7 +641,6 @@ if uploaded_files:
                             x_title = "Tiempo"
                         x_hover = x_vals.round(2).astype(str)
 
-                    # Selector de Y_vals
                     y_vals = None
                     y_title = metrica_comp
 
@@ -613,6 +655,13 @@ if uploaded_files:
                         y_title = "Brazadas/min" if d['meta']['es_natacion'] else "Pasos/min"
                     elif metrica_comp == "Coste Cardíaco (Latidos/km)" and 'latidos_por_km_suavizado' in df_c.columns:
                         y_vals = df_c['latidos_por_km_suavizado']
+                    elif metrica_comp == "Factor de Eficiencia (EF)":
+                        ef_val, _ = calcular_factor_eficiencia(df_c, es_natacion=d['meta']['es_natacion'])
+                        if 'speed' in df_c.columns and 'heart_rate' in df_c.columns:
+                            vel_m_min = df_c['speed'] * 60
+                            ef_inst = np.where(df_c['heart_rate'] > 0, vel_m_min / df_c['heart_rate'], np.nan)
+                            y_vals = pd.Series(ef_inst).rolling(window=15, min_periods=1).mean()
+                            y_title = "EF (m/min por latido)"
 
                     if y_vals is not None and not y_vals.isna().all():
                         str_off = f" ({off_sec:+}s)" if off_sec != 0 else ""
@@ -622,7 +671,7 @@ if uploaded_files:
                             mode='lines',
                             name=f"{nom_act}{str_off}",
                             customdata=x_hover,
-                            hovertemplate=f"<b>{nom_act}</b><br>X: %{{customdata}}<br>{y_title}: %{{y:.1f}}<extra></extra>"
+                            hovertemplate=f"<b>{nom_act}</b><br>X: %{{customdata}}<br>{y_title}: %{{y:.2f}}<extra></extra>"
                         ))
 
                 fig_comp.update_layout(
@@ -638,9 +687,6 @@ if uploaded_files:
 
                 st.plotly_chart(fig_comp, use_container_width=True)
 
-        # =====================================================================
-        # PESTAÑA 3: DIAGNÓSTICO DE EFICIENCIA E IA COACH
-        # =====================================================================
         with tab_diag:
             st.subheader("🧠 Análisis Fisiológico y Razonamiento de Rendimiento")
             
@@ -707,4 +753,3 @@ if uploaded_files:
                         
                         respuesta_ia = consultar_gemini_coach(prompt)
                         st.markdown(f"```\n{respuesta_ia}\n```")
-                        
