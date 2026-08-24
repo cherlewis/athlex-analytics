@@ -226,25 +226,57 @@ def leer_fichero_fit(file_bytes, file_name):
     return df_records, df_laps, df_lengths, metadata
 
 def obtener_metricas_run_filtradas(df, laps, meta):
-    """Calcula métricas promedio exclusivas para las fases principales de Carrera (Run)."""
+    """Calcula métricas promedio exclusivas para las fases principales de Carrera (Run), descartando el Cool Down y lo posterior."""
     df_run = pd.DataFrame()
     
     if not df.empty:
-        if 'sport' in df.columns:
-            mask = df['sport'].astype(str).str.lower().str.contains('run|carrera') | (df['sport'] == 1)
-            df_run = df[mask]
+        df_filtered = df.copy()
         
-        # Si no hay columna de deporte o no filtró nada, usar la actividad entera si es Carrera
-        if df_run.empty and not meta.get('es_natacion', False):
-            df_run = df.copy()
+        # 1. Detección del inicio de la fase de Cool Down (Enfriamiento)
+        if not laps.empty and 'start_time' in laps.columns:
+            cooldown_start = None
+            
+            for _, lap in laps.iterrows():
+                is_cooldown = False
+                
+                # Comprobar indicadores del protocolo FIT para Enfriamiento
+                if 'intensity' in lap and lap['intensity'] is not None:
+                    intens = str(lap['intensity']).lower()
+                    if 'cool' in intens or 'enfri' in intens or intens == '3' or lap['intensity'] == 3:
+                        is_cooldown = True
+                
+                if 'wkt_step_type' in lap and lap['wkt_step_type'] is not None:
+                    wkt = str(lap['wkt_step_type']).lower()
+                    if 'cool' in wkt or 'enfri' in wkt or wkt == '1' or lap['wkt_step_type'] == 1:
+                        is_cooldown = True
+                        
+                lap_dict_str = str(lap.to_dict()).lower()
+                if 'cool' in lap_dict_str or 'enfri' in lap_dict_str or 'descalentamiento' in lap_dict_str:
+                    is_cooldown = True
+                    
+                if is_cooldown and pd.notna(lap['start_time']):
+                    cooldown_start = convert_to_madrid_time(lap['start_time'])
+                    break  # Nos quedamos con la primera fase de enfriamiento encontrada
+            
+            # Si existió un Enfriamiento, descartamos todos los registros desde ese momento en adelante
+            if cooldown_start is not None and 'timestamp' in df_filtered.columns:
+                df_filtered = df_filtered[df_filtered['timestamp'] < cooldown_start]
 
-    # Considerar solo puntos con movimiento (> 0.5 m/s)
+        # 2. Filtrado por deporte de carrera
+        if 'sport' in df_filtered.columns:
+            mask = df_filtered['sport'].astype(str).str.lower().str.contains('run|carrera') | (df_filtered['sport'] == 1)
+            df_run = df_filtered[mask]
+        
+        if df_run.empty and not meta.get('es_natacion', False):
+            df_run = df_filtered.copy()
+
+    # Considerar solo puntos con movimiento activo (> 0.5 m/s)
     if not df_run.empty and 'speed' in df_run.columns:
         df_run_activa = df_run[df_run['speed'] > 0.5]
         if not df_run_activa.empty:
             df_run = df_run_activa
 
-    # 1. Avg Pace
+    # A. Avg Pace
     pace_str = "N/A"
     if not df_run.empty and 'speed' in df_run.columns:
         avg_speed = df_run['speed'].mean()
@@ -254,7 +286,7 @@ def obtener_metricas_run_filtradas(df, laps, meta):
             segs = int((pace_dec - mins) * 60)
             pace_str = f"{mins}:{segs:02d} /km"
 
-    # 2. FC Promedio (Run)
+    # B. FC Promedio (Run)
     fc_prom_str = "N/A"
     if not df_run.empty and 'heart_rate' in df_run.columns:
         hr_val = df_run['heart_rate'].dropna().mean()
@@ -263,7 +295,7 @@ def obtener_metricas_run_filtradas(df, laps, meta):
     elif meta.get('fc_media'):
         fc_prom_str = f"{int(meta['fc_media'])} ppm"
 
-    # 3. Coste Cardíaco (Run) = FC x Ritmo decimal (lat/km)
+    # C. Coste Cardíaco (Run)
     coste_run_str = "N/A"
     if not df_run.empty and 'speed' in df_run.columns and 'heart_rate' in df_run.columns:
         avg_speed = df_run['speed'].mean()
@@ -273,7 +305,7 @@ def obtener_metricas_run_filtradas(df, laps, meta):
             coste_val = int(avg_hr * pace_dec)
             coste_run_str = f"{coste_val} lat/km"
 
-    # 4. Running Power (W)
+    # D. Running Power (Run)
     power_run_str = "N/A"
     if not df_run.empty and 'power' in df_run.columns:
         pow_val = df_run['power'].dropna().mean()
@@ -409,7 +441,7 @@ if uploaded_files:
             lengths = sel['lengths']
             es_nat = meta['es_natacion']
 
-            # Cálculos de Eficiencia y Métricas Filtradas de Run
+            # Cálculos de Eficiencia y Métricas Filtradas de Run (sin Cool Down)
             ef_valor, drift_valor = calcular_factor_eficiencia(df, es_natacion=es_nat)
             pace_run_str, fc_run_str, coste_run_str, power_run_str = obtener_metricas_run_filtradas(df, laps, meta)
 
@@ -429,17 +461,17 @@ if uploaded_files:
             dur_mins = int(meta['duracion_total'] // 60)
             dur_segs = int(meta['duracion_total'] % 60)
             r1_col2.metric("Duración", f"{dur_mins}m {dur_segs}s")
-            r1_col3.metric("Avg. Pace (Run)", pace_run_str, help="Ritmo medio exclusivo de las fases principales de Carrera")
+            r1_col3.metric("Avg. Pace (Run)", pace_run_str, help="Ritmo medio exclusivo de la fase principal de Carrera (excluye Enfriamiento/Cool Down)")
 
             # Fila 2: FC Promedio (Run) | EF (Eficiencia) | Coste Cardíaco (Run)
             r2_col1, r2_col2, r2_col3 = st.columns(3)
-            r2_col1.metric("FC Promedio (Run)", fc_run_str, help="Pulsaciones medias en la sesión principal de Carrera")
+            r2_col1.metric("FC Promedio (Run)", fc_run_str, help="Pulsaciones medias en la fase principal de Carrera (excluye Enfriamiento/Cool Down)")
             r2_col2.metric("EF (Eficiencia)", f"{ef_valor}" if ef_valor is not None else "N/A", help="Factor de Eficiencia: Velocidad (m/min) / FC Media")
-            r2_col3.metric("Coste Cardíaco (Run)", coste_run_str, help="Latidos consumidos por km en la sesión de Carrera")
+            r2_col3.metric("Coste Cardíaco (Run)", coste_run_str, help="Latidos consumidos por km en la fase principal de Carrera (excluye Enfriamiento/Cool Down)")
 
             # Fila 3: Running Power (Run) | Calorías | Temperatura
             r3_col1, r3_col2, r3_col3 = st.columns(3)
-            r3_col1.metric("Running Power (Run)", power_run_str, help="Potencia media de carrera en Vatios (W)")
+            r3_col1.metric("Running Power (Run)", power_run_str, help="Potencia media de carrera en Vatios (excluye Enfriamiento/Cool Down)")
             r3_col2.metric("Calorías", f"{int(meta['calorias_totales'])} kcal" if meta['calorias_totales'] else "N/A")
             r3_col3.metric("Temperatura", f"{meta['temperatura_media']} °C" if meta['temperatura_media'] is not None else "N/A")
 
@@ -537,7 +569,6 @@ if uploaded_files:
                 fig_cad.update_layout(xaxis_title="Tiempo", yaxis_title="Frecuencia")
                 st.plotly_chart(fig_cad, use_container_width=True)
 
-            # Mapa GPS Ocultable
             if 'lat' in df.columns and 'lon' in df.columns and not df['lat'].dropna().empty:
                 st.subheader("🗺️ Trazado de Ruta GPS")
                 if st.toggle("Mostrar Mapa de Ruta", value=True, key=f"tog_map_{idx_sel}"):
