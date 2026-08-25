@@ -66,12 +66,60 @@ def convert_to_madrid_time(dt):
 # FUNCIONES DE PROCESAMIENTO DE TELEMETRÍA Y FIT
 # -----------------------------------------------------------------------------
 
+# STREAMLIT_CHUNK: Reconstruyendo la función procesar_telemetria con sangrado correcto...
 def procesar_telemetria(df, es_natacion=False):
     """Limpia, convierte unidades, filtra artefactos de FC y calcula métricas."""
     df = df.copy()
     
+    # 1. Zona Horaria Madrid y Tiempo Relativo
     if 'timestamp' in df.columns:
-    # 3. FRECUENCIA CARDÍACA: FILTRO ANTI-ARTEFACTOS (Mediana Móvil Centrada Ampliada)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df['timestamp'].dt.tz is None:
+            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Europe/Madrid')
+        else:
+            df['timestamp'] = df['timestamp'].dt.tz_convert('Europe/Madrid')
+            
+        tiempo_inicio = df['timestamp'].iloc[0]
+        df['Tiempo_Segundos'] = (df['timestamp'] - tiempo_inicio).dt.total_seconds()
+        
+        def formato_tiempo(segs):
+            horas = int(segs // 3600)
+            mins = int((segs % 3600) // 60)
+            segs_rest = int(segs % 60)
+            if horas > 0:
+                return f"{horas:02d}:{mins:02d}:{segs_rest:02d}"
+            return f"{mins:02d}:{segs_rest:02d}"
+            
+        df['Tiempo_Formato'] = df['Tiempo_Segundos'].apply(formato_tiempo)
+
+    # 2. Distancia acumulada continua (si existe)
+    if 'distance' in df.columns:
+        if es_natacion:
+            df['distancia_acum_m'] = df['distance']
+        else:
+            df['distancia_acum_km'] = df['distance'] / 1000.0
+
+    # 3. Cálculo de Velocidad y Ritmo
+    if 'speed' in df.columns:
+        df['speed_kmh'] = df['speed'] * 3.6
+        
+        if es_natacion:
+            df['ritmo_decimal'] = np.where(df['speed'] > 0.05, 1.66667 / df['speed'], np.nan)
+        else:
+            df['ritmo_decimal'] = np.where(df['speed'] > 0.5, 16.6667 / df['speed'], np.nan)
+        
+        df['ritmo_suavizado'] = df['ritmo_decimal'].rolling(window=10, min_periods=1).mean()
+        
+        def decimal_a_ritmo_texto(val):
+            if pd.isna(val) or val > 30:
+                return None
+            mins = int(val)
+            segs = int((val - mins) * 60)
+            return f"{mins}:{segs:02d}"
+            
+        df['Ritmo_Texto'] = df['ritmo_suavizado'].apply(decimal_a_ritmo_texto)
+
+    # 4. FRECUENCIA CARDÍACA: FILTRO ANTI-ARTEFACTOS (Mediana Móvil Centrada Ampliada a 35s)
     if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
         df['heart_rate_raw'] = df['heart_rate']
         
@@ -90,6 +138,7 @@ def procesar_telemetria(df, es_natacion=False):
         # D) Suavizado suave final de 5 segundos centrados para fluidez de la curva
         df['heart_rate'] = pd.Series(hr_limpia).rolling(window=5, center=True, min_periods=1).mean()
 
+    # 5. Relación Ritmo y FC / Coste Cardíaco
     if 'ritmo_suavizado' in df.columns and 'heart_rate' in df.columns:
         df['latidos_por_km'] = df['heart_rate'] * df['ritmo_suavizado']
         df['latidos_por_km_suavizado'] = df['latidos_por_km'].rolling(window=15, min_periods=1).mean()
@@ -99,12 +148,14 @@ def procesar_telemetria(df, es_natacion=False):
         df['ef_inst'] = np.where(df['heart_rate'] > 0, vel_m_min / df['heart_rate'], np.nan)
         df['ef_suavizado'] = df['ef_inst'].rolling(window=15, min_periods=1).mean()
 
+    # 6. Coordenadas GPS (Solo si existen)
     if 'position_lat' in df.columns and 'position_long' in df.columns:
         df_valid_gps = df.dropna(subset=['position_lat', 'position_long'])
         if not df_valid_gps.empty:
             df['lat'] = df['position_lat'] * (180 / 2**31)
             df['lon'] = df['position_long'] * (180 / 2**31)
 
+    # 7. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
     if 'cadence' in df.columns:
         if es_natacion:
             df['cadence_spm'] = df['cadence']
