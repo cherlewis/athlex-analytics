@@ -71,67 +71,23 @@ def procesar_telemetria(df, es_natacion=False):
     df = df.copy()
     
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        if df['timestamp'].dt.tz is None:
-            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC').dt.tz_convert('Europe/Madrid')
-        else:
-            df['timestamp'] = df['timestamp'].dt.tz_convert('Europe/Madrid')
-            
-        tiempo_inicio = df['timestamp'].iloc[0]
-        df['Tiempo_Segundos'] = (df['timestamp'] - tiempo_inicio).dt.total_seconds()
-        
-        def formato_tiempo(segs):
-            horas = int(segs // 3600)
-            mins = int((segs % 3600) // 60)
-            segs_rest = int(segs % 60)
-            if horas > 0:
-                return f"{horas:02d}:{mins:02d}:{segs_rest:02d}"
-            return f"{mins:02d}:{segs_rest:02d}"
-            
-        df['Tiempo_Formato'] = df['Tiempo_Segundos'].apply(formato_tiempo)
-
-    if 'distance' in df.columns:
-        if es_natacion:
-            df['distancia_acum_m'] = df['distance']
-        else:
-            df['distancia_acum_km'] = df['distance'] / 1000.0
-
-    if 'speed' in df.columns:
-        df['speed_kmh'] = df['speed'] * 3.6
-        
-        if es_natacion:
-            df['ritmo_decimal'] = np.where(df['speed'] > 0.05, 1.66667 / df['speed'], np.nan)
-        else:
-            df['ritmo_decimal'] = np.where(df['speed'] > 0.5, 16.6667 / df['speed'], np.nan)
-        
-        df['ritmo_suavizado'] = df['ritmo_decimal'].rolling(window=10, min_periods=1).mean()
-        
-        def decimal_a_ritmo_texto(val):
-            if pd.isna(val) or val > 30:
-                return None
-            mins = int(val)
-            segs = int((val - mins) * 60)
-            return f"{mins}:{segs:02d}"
-            
-        df['Ritmo_Texto'] = df['ritmo_suavizado'].apply(decimal_a_ritmo_texto)
-
-    # 3. FRECUENCIA CARDÍACA: FILTRO ANTI-ARTEFACTOS (Mediana Móvil + Límite de Desviación Local)
+    # 3. FRECUENCIA CARDÍACA: FILTRO ANTI-ARTEFACTOS (Mediana Móvil Centrada Ampliada)
     if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
         df['heart_rate_raw'] = df['heart_rate']
         
         # A) Rango fisiológico básico (35 ppm a 215 ppm)
         hr_series = df['heart_rate'].where((df['heart_rate'] >= 35) & (df['heart_rate'] <= 215), np.nan)
         
-        # B) Mediana Móvil Centrada (ventana de 11 segundos)
-        # Ignora picos/caídas falsas aisladas de 1 a 4 segundos
-        hr_median = hr_series.rolling(window=11, center=True, min_periods=1).median()
+        # B) Mediana Móvil Centrada de ventana ampliada (35 segundos)
+        # Captura y neutraliza picos o caídas falsas de la banda torácica de hasta 15-20s de duración
+        hr_median = hr_series.rolling(window=35, center=True, min_periods=1).median()
         
-        # C) Detección de desviación extrema respecto a la mediana del entorno local
+        # C) Detección de desviación extrema respecto a la tendencia local de 35s
         desviacion = (hr_series - hr_median).abs()
-        # Si un dato salta más de 7 ppm respecto a la tendencia de su entorno de 11s, se sustituye por la mediana
-        hr_limpia = np.where(desviacion > 7.0, hr_median, hr_series)
+        # Si un dato salta más de 6 ppm respecto a la tendencia de su entorno, se sustituye por la mediana
+        hr_limpia = np.where(desviacion > 6.0, hr_median, hr_series)
         
-        # D) Suavizado suave final de 5 segundos centrados para fluidez perfecta
+        # D) Suavizado suave final de 5 segundos centrados para fluidez de la curva
         df['heart_rate'] = pd.Series(hr_limpia).rolling(window=5, center=True, min_periods=1).mean()
 
     if 'ritmo_suavizado' in df.columns and 'heart_rate' in df.columns:
@@ -808,4 +764,3 @@ if uploaded_files:
                         
                         respuesta_ia = consultar_gemini_coach(prompt)
                         st.markdown(f"```\n{respuesta_ia}\n```")
-                        
