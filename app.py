@@ -67,7 +67,7 @@ def convert_to_madrid_time(dt):
 # -----------------------------------------------------------------------------
 
 def procesar_telemetria(df, es_natacion=False):
-    """Limpia, convierte unidades y calcula métricas según el deporte (Carrera vs Natación)."""
+    """Limpia, convierte unidades, filtra artefactos de FC y calcula métricas."""
     df = df.copy()
     
     if 'timestamp' in df.columns:
@@ -115,9 +115,24 @@ def procesar_telemetria(df, es_natacion=False):
             
         df['Ritmo_Texto'] = df['ritmo_suavizado'].apply(decimal_a_ritmo_texto)
 
-    if 'heart_rate' in df.columns:
+    # 3. FRECUENCIA CARDÍACA: FILTRO ANTI-ARTEFACTOS (Mediana Móvil + Límite de Desviación Local)
+    if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
         df['heart_rate_raw'] = df['heart_rate']
-        df['heart_rate'] = df['heart_rate'].rolling(window=5, min_periods=1).mean()
+        
+        # A) Rango fisiológico básico (35 ppm a 215 ppm)
+        hr_series = df['heart_rate'].where((df['heart_rate'] >= 35) & (df['heart_rate'] <= 215), np.nan)
+        
+        # B) Mediana Móvil Centrada (ventana de 11 segundos)
+        # Ignora picos/caídas falsas aisladas de 1 a 4 segundos
+        hr_median = hr_series.rolling(window=11, center=True, min_periods=1).median()
+        
+        # C) Detección de desviación extrema respecto a la mediana del entorno local
+        desviacion = (hr_series - hr_median).abs()
+        # Si un dato salta más de 7 ppm respecto a la tendencia de su entorno de 11s, se sustituye por la mediana
+        hr_limpia = np.where(desviacion > 7.0, hr_median, hr_series)
+        
+        # D) Suavizado suave final de 5 segundos centrados para fluidez perfecta
+        df['heart_rate'] = pd.Series(hr_limpia).rolling(window=5, center=True, min_periods=1).mean()
 
     if 'ritmo_suavizado' in df.columns and 'heart_rate' in df.columns:
         df['latidos_por_km'] = df['heart_rate'] * df['ritmo_suavizado']
@@ -229,9 +244,8 @@ def leer_fichero_fit(file_bytes, file_name):
 
 def obtener_metricas_fase_principal(laps_df, es_natacion):
     """
-    Busca de forma inteligente las vueltas (laps) correspondientes a la fase principal ("Run"),
-    descartando los intervalos marcados explícitamente como descanso (Rest), calentamiento (Warm Up) o enfriamiento (Cool Down).
-    Si no encuentra fases nombradas, usa la vuelta más larga de la sesión.
+    Busca las vueltas (laps) correspondientes a la fase principal ("Run"),
+    descartando los intervalos marcados explícitamente como descanso, calentamiento o enfriamiento.
     """
     res = {
         'pace_str': 'N/A',
@@ -243,43 +257,28 @@ def obtener_metricas_fase_principal(laps_df, es_natacion):
     if laps_df is None or laps_df.empty:
         return res
 
-    # Convertimos los datos de las vueltas para que sea más fácil operar con ellos
     df_laps = laps_df.copy()
-    
-    # 1. Intentar identificar las fases activas utilizando campos estándar del protocolo FIT
-    # wkt_step_name, intensity o wkt_step_type
-    
     laps_run = pd.DataFrame()
     
-    # Método A: Buscar por el nombre del paso si existe (ej. "Run")
     if 'wkt_step_name' in df_laps.columns:
-        # Filtramos aquellas vueltas cuyo nombre contenga 'run', 'carrera', etc y descartamos 'warm', 'cool', 'rest'
         cond_run = df_laps['wkt_step_name'].astype(str).str.lower().str.contains('run|carrera|work|active')
         cond_not_warm = ~df_laps['wkt_step_name'].astype(str).str.lower().str.contains('warm|cool|rest|recover')
         laps_run = df_laps[cond_run & cond_not_warm]
 
-    # Método B: Buscar por tipo de intensidad (Intensity: 0=Active, 1=Rest, 2=Warmup, 3=Cooldown)
     if laps_run.empty and 'intensity' in df_laps.columns:
         laps_run = df_laps[df_laps['intensity'] == 0]
         
-    # Método C: Buscar por tipo de paso de entrenamiento (wkt_step_type: 3=Active)
     if laps_run.empty and 'wkt_step_type' in df_laps.columns:
         laps_run = df_laps[df_laps['wkt_step_type'] == 3]
 
-    # Método D (Respaldo): Si no hay fases explícitas grabadas (ej. un rodaje continuo sin entrenamientos programados),
-    # simplemente tomamos la vuelta (o vueltas) más largas o descartamos la primera y última si son claramente distintas.
     if laps_run.empty:
-        # Como aproximación básica si no hay metadata, asumimos que todas las vueltas son de carrera
-        # a menos que haya muchas, en cuyo caso podríamos excluir la primera y última si son de calentamiento manual.
-        # Por seguridad y para evitar descartar datos válidos en rodajes normales, tomaremos todas.
         laps_run = df_laps
         
     if not laps_run.empty:
-        # Ponderamos los promedios por el tiempo de duración de cada fase para obtener una media precisa
         if 'total_elapsed_time' in laps_run.columns:
             duracion_total_run = laps_run['total_elapsed_time'].sum()
             
-            # Promedio ponderado de Ritmo (Avg Speed m/s)
+            # Promedio ponderado de Ritmo
             if 'avg_speed' in laps_run.columns and duracion_total_run > 0:
                 avg_speed_run = (laps_run['avg_speed'] * laps_run['total_elapsed_time']).sum() / duracion_total_run
                 if avg_speed_run > 0:
@@ -294,9 +293,8 @@ def obtener_metricas_fase_principal(laps_df, es_natacion):
                         segs = int((pace_dec - mins) * 60)
                         res['pace_str'] = f"{mins}:{segs:02d} /km"
             
-            # Promedio ponderado de Frecuencia Cardíaca
+            # Promedio ponderado de FC
             if 'avg_heart_rate' in laps_run.columns and duracion_total_run > 0:
-                # Evitar NaN
                 valid_hr_laps = laps_run.dropna(subset=['avg_heart_rate', 'total_elapsed_time'])
                 if not valid_hr_laps.empty:
                     dur_val_hr = valid_hr_laps['total_elapsed_time'].sum()
@@ -304,13 +302,12 @@ def obtener_metricas_fase_principal(laps_df, es_natacion):
                         avg_hr_run = (valid_hr_laps['avg_heart_rate'] * valid_hr_laps['total_elapsed_time']).sum() / dur_val_hr
                         res['fc_str'] = f"{int(round(avg_hr_run))} ppm"
                         
-                        # Ya que tenemos el ritmo y FC exactos de la fase Run, calculamos el Coste Cardíaco de la fase Run
                         if avg_speed_run > 0 and not es_natacion:
                            pace_dec = 16.6667 / avg_speed_run
                            coste = avg_hr_run * pace_dec
                            res['coste_str'] = f"{int(round(coste))} lat/km"
 
-            # Promedio ponderado de Potencia de Carrera
+            # Promedio ponderado de Potencia
             if 'avg_power' in laps_run.columns and duracion_total_run > 0:
                 valid_pwr_laps = laps_run.dropna(subset=['avg_power', 'total_elapsed_time'])
                 if not valid_pwr_laps.empty:
@@ -503,7 +500,7 @@ if uploaded_files:
             # Gráfica Principal: Ritmo y FC
             if not df.empty and 'ritmo_suavizado' in df.columns:
                 etiqueta_ritmo = "Ritmo (min/100m)" if es_nat else "Ritmo (min/km)"
-                st.subheader(f"📉 {etiqueta_ritmo} y Frecuencia Cardíaca (ppm)")
+                st.subheader(f"📉 {etiqueta_ritmo} y Frecuencia Cardíaca Filtrada (ppm)")
                 
                 fig = go.Figure()
 
@@ -518,7 +515,7 @@ if uploaded_files:
                 if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
                     fig.add_trace(go.Scatter(
                         x=df['Tiempo_Segundos'], y=df['heart_rate'],
-                        mode='lines', name='FC (ppm)', yaxis='y2',
+                        mode='lines', name='FC Filtrada (ppm)', yaxis='y2',
                         line=dict(color='#EF553B', width=2),
                         hovertemplate="FC: %{y:.0f} ppm<extra></extra>"
                     ))
@@ -605,7 +602,6 @@ if uploaded_files:
                 
                 df_laps_show = laps[cols_mostrar].copy()
                 
-                # Convertir Intensity a texto si existe
                 if 'intensity' in df_laps_show.columns:
                    mapping_int = {0: 'Active', 1: 'Rest', 2: 'Warmup', 3: 'Cooldown'}
                    df_laps_show['intensity'] = df_laps_show['intensity'].map(mapping_int).fillna(df_laps_show['intensity'])
@@ -812,3 +808,4 @@ if uploaded_files:
                         
                         respuesta_ia = consultar_gemini_coach(prompt)
                         st.markdown(f"```\n{respuesta_ia}\n```")
+                        
