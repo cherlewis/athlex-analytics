@@ -149,11 +149,28 @@ def procesar_telemetria(df, es_natacion=False):
         df['ef_suavizado'] = df['ef_inst'].rolling(window=15, min_periods=1).mean()
 
     # 6. Coordenadas GPS (Solo si existen)
-    if 'position_lat' in df.columns and 'position_long' in df.columns:
-        df_valid_gps = df.dropna(subset=['position_lat', 'position_long'])
+    col_lat = next((c for c in ['position_lat', 'latitude', 'lat'] if c in df.columns), None)
+    col_lon = next((c for c in ['position_long', 'longitude', 'lon', 'long'] if c in df.columns), None)
+
+    if col_lat and col_lon:
+        df_valid_gps = df.dropna(subset=[col_lat, col_lon])
         if not df_valid_gps.empty:
-            df['lat'] = df['position_lat'] * (180 / 2**31)
-            df['lon'] = df['position_long'] * (180 / 2**31)
+            # Los relojes COROS guardan coordenadas en semicírculos (enteros de 32 bits > 180)
+            if df_valid_gps[col_lat].abs().max() > 180:
+                df['lat'] = df[col_lat] * (180 / (2**31))
+                df['lon'] = df[col_lon] * (180 / (2**31))
+            else:
+                df['lat'] = df[col_lat]
+                df['lon'] = df[col_lon]
+
+            # Descartar coordenadas inválidas o puntos de satélite no fijado (0.0)
+            es_gps_valido = (
+                (df['lat'].abs() > 0.001) & 
+                (df['lon'].abs() > 0.001) & 
+                (df['lat'].between(-90, 90)) & 
+                (df['lon'].between(-180, 180))
+            )
+            df.loc[~es_gps_valido, ['lat', 'lon']] = np.nan
 
     # 7. Cadencia (Pasos en Carrera vs Brazadas en Piscina)
     if 'cadence' in df.columns:
@@ -594,22 +611,64 @@ if uploaded_files:
                 st.subheader("🗺️ Trazado de Ruta GPS")
                 if st.toggle("Mostrar Mapa de Ruta", value=True, key=f"tog_map_{idx_sel}"):
                     df_mapa = df.dropna(subset=['lat', 'lon'])
-                    try:
-                        # Compatibilidad con versiones modernas de Plotly (line_map) y anteriores (line_mapbox)
-                        if hasattr(px, 'line_map'):
-                            fig_map = px.line_map(df_mapa, lat="lat", lon="lon", zoom=13, height=400)
-                            fig_map.update_traces(line=dict(width=3, color="red"))
-                            fig_map.update_layout(map_style="open-street-map", margin={"r": 0, "t": 0, "l": 0, "b": 0})
-                        elif hasattr(px, 'line_mapbox'):
-                            fig_map = px.line_mapbox(df_mapa, lat="lat", lon="lon", zoom=13, height=400)
-                            fig_map.update_traces(line=dict(width=3, color="red"))
-                            fig_map.update_layout(mapbox_style="open-street-map", margin={"r": 0, "t": 0, "l": 0, "b": 0})
-                        else:
-                            fig_map = go.Figure(go.Scatter(x=df_mapa['lon'], y=df_mapa['lat'], mode='lines', line=dict(color="red", width=3)))
-                            fig_map.update_layout(xaxis_title="Longitud", yaxis_title="Latitud", margin={"r": 0, "t": 0, "l": 0, "b": 0})
-                        st.plotly_chart(fig_map, use_container_width=True)
-                    except Exception as err_mapa:
-                        st.warning(f"No se pudo renderizar el mapa GPS: {err_mapa}")
+                    
+                    if df_mapa.empty:
+                        st.info("No se encontraron puntos GPS válidos en este entrenamiento.")
+                    else:
+                        # Calculamos el punto medio exacto de la ruta para centrar la cámara
+                        centro_lat = float(df_mapa['lat'].mean())
+                        centro_lon = float(df_mapa['lon'].mean())
+
+                        try:
+                            fig_map = go.Figure()
+
+                            # Trazo de la ruta (línea continua de alta visibilidad)
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=df_mapa['lat'],
+                                lon=df_mapa['lon'],
+                                mode='lines',
+                                line=dict(width=4, color='#FF3366'),
+                                name='Ruta GPS',
+                                hoverinfo='skip'
+                            ))
+
+                            # Marcador de Salida (Verde)
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=[df_mapa['lat'].iloc[0]],
+                                lon=[df_mapa['lon'].iloc[0]],
+                                mode='markers',
+                                marker=dict(size=12, color='#00CC96'),
+                                name='Salida',
+                                hovertemplate="🟢 Inicio<extra></extra>"
+                            ))
+
+                            # Marcador de Meta (Rojo)
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=[df_mapa['lat'].iloc[-1]],
+                                lon=[df_mapa['lon'].iloc[-1]],
+                                mode='markers',
+                                marker=dict(size=12, color='#EF553B'),
+                                name='Meta',
+                                hovertemplate="🏁 Llegada<extra></extra>"
+                            ))
+
+                            fig_map.update_layout(
+                                mapbox=dict(
+                                    style="open-street-map",
+                                    center=dict(lat=centro_lat, lon=centro_lon),
+                                    zoom=13
+                                ),
+                                margin={"r": 0, "t": 0, "l": 0, "b": 0},
+                                height=450,
+                                showlegend=True,
+                                legend=dict(orientation="h", y=1.02, x=0.01)
+                            )
+                            st.plotly_chart(fig_map, use_container_width=True)
+
+                        except Exception as err_mapa:
+                            # Respaldo automático con el mapa nativo de Streamlit si Plotly falla
+                            st.caption(f"Mostrando mapa de respaldo ({err_mapa}):")
+                            st.map(df_mapa[['lat', 'lon']])
 
             # Tabla de Vueltas / Desglose
             if not laps.empty:
