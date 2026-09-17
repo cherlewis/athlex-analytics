@@ -620,10 +620,14 @@ if uploaded_files:
                         centro_lon = float(df_mapa['lon'].mean())
 
                         try:
+                            # Plotly moderno (v6+) usa Scattermap/map; versiones anteriores usan Scattermapbox/mapbox
+                            usa_map_moderno = hasattr(go, 'Scattermap')
+                            ClaseTrazaMapa = go.Scattermap if usa_map_moderno else go.Scattermapbox
+
                             fig_map = go.Figure()
 
-                            # Trazo de la ruta con grosor fino y estilizado
-                            fig_map.add_trace(go.Scattermapbox(
+                            # Trazo de la ruta con grosor fino y estilizado (width=2)
+                            fig_map.add_trace(ClaseTrazaMapa(
                                 lat=df_mapa['lat'],
                                 lon=df_mapa['lon'],
                                 mode='lines',
@@ -633,31 +637,38 @@ if uploaded_files:
                             ))
 
                             # Marcador de Salida (Verde)
-                            fig_map.add_trace(go.Scattermapbox(
+                            fig_map.add_trace(ClaseTrazaMapa(
                                 lat=[df_mapa['lat'].iloc[0]],
                                 lon=[df_mapa['lon'].iloc[0]],
                                 mode='markers',
-                                marker=dict(size=9, color='#00CC96'),
+                                marker=dict(size=8, color='#00CC96'),
                                 name='Salida',
                                 hovertemplate="🟢 Inicio<extra></extra>"
                             ))
 
                             # Marcador de Meta (Rojo)
-                            fig_map.add_trace(go.Scattermapbox(
+                            fig_map.add_trace(ClaseTrazaMapa(
                                 lat=[df_mapa['lat'].iloc[-1]],
                                 lon=[df_mapa['lon'].iloc[-1]],
                                 mode='markers',
-                                marker=dict(size=9, color='#EF553B'),
+                                marker=dict(size=8, color='#EF553B'),
                                 name='Meta',
                                 hovertemplate="🏁 Llegada<extra></extra>"
                             ))
 
+                            # Configuración de cámara y estilo del mapa
+                            config_camara = dict(
+                                style="open-street-map",
+                                center=dict(lat=centro_lat, lon=centro_lon),
+                                zoom=13
+                            )
+
+                            if usa_map_moderno:
+                                fig_map.update_layout(map=config_camara)
+                            else:
+                                fig_map.update_layout(mapbox=config_camara)
+
                             fig_map.update_layout(
-                                mapbox=dict(
-                                    style="open-street-map",
-                                    center=dict(lat=centro_lat, lon=centro_lon),
-                                    zoom=13
-                                ),
                                 margin={"r": 0, "t": 0, "l": 0, "b": 0},
                                 height=450,
                                 showlegend=True,
