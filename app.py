@@ -622,12 +622,12 @@ if uploaded_files:
                         try:
                             fig_map = go.Figure()
 
-                            # Trazo de la ruta (línea continua de alta visibilidad)
+                            # Trazo de la ruta con grosor fino y estilizado
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=df_mapa['lat'],
                                 lon=df_mapa['lon'],
                                 mode='lines',
-                                line=dict(width=4, color='#FF3366'),
+                                line=dict(width=2, color='#FF3366'),
                                 name='Ruta GPS',
                                 hoverinfo='skip'
                             ))
@@ -637,7 +637,7 @@ if uploaded_files:
                                 lat=[df_mapa['lat'].iloc[0]],
                                 lon=[df_mapa['lon'].iloc[0]],
                                 mode='markers',
-                                marker=dict(size=12, color='#00CC96'),
+                                marker=dict(size=9, color='#00CC96'),
                                 name='Salida',
                                 hovertemplate="🟢 Inicio<extra></extra>"
                             ))
@@ -647,7 +647,7 @@ if uploaded_files:
                                 lat=[df_mapa['lat'].iloc[-1]],
                                 lon=[df_mapa['lon'].iloc[-1]],
                                 mode='markers',
-                                marker=dict(size=12, color='#EF553B'),
+                                marker=dict(size=9, color='#EF553B'),
                                 name='Meta',
                                 hovertemplate="🏁 Llegada<extra></extra>"
                             ))
