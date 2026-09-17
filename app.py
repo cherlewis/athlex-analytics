@@ -594,40 +594,100 @@ if uploaded_files:
                 st.subheader("🗺️ Trazado de Ruta GPS")
                 if st.toggle("Mostrar Mapa de Ruta", value=True, key=f"tog_map_{idx_sel}"):
                     df_mapa = df.dropna(subset=['lat', 'lon'])
-                    fig_map = px.line_mapbox(df_mapa, lat="lat", lon="lon", zoom=13, height=400)
-                    fig_map.update_traces(line=dict(width=3, color="red"))
-                    fig_map.update_layout(mapbox_style="open-street-map", margin={"r":0,"t":0,"l":0,"b":0})
-                    st.plotly_chart(fig_map, use_container_width=True)
+                    try:
+                        # Compatibilidad con versiones modernas de Plotly (line_map) y anteriores (line_mapbox)
+                        if hasattr(px, 'line_map'):
+                            fig_map = px.line_map(df_mapa, lat="lat", lon="lon", zoom=13, height=400)
+                            fig_map.update_traces(line=dict(width=3, color="red"))
+                            fig_map.update_layout(map_style="open-street-map", margin={"r": 0, "t": 0, "l": 0, "b": 0})
+                        elif hasattr(px, 'line_mapbox'):
+                            fig_map = px.line_mapbox(df_mapa, lat="lat", lon="lon", zoom=13, height=400)
+                            fig_map.update_traces(line=dict(width=3, color="red"))
+                            fig_map.update_layout(mapbox_style="open-street-map", margin={"r": 0, "t": 0, "l": 0, "b": 0})
+                        else:
+                            fig_map = go.Figure(go.Scatter(x=df_mapa['lon'], y=df_mapa['lat'], mode='lines', line=dict(color="red", width=3)))
+                            fig_map.update_layout(xaxis_title="Longitud", yaxis_title="Latitud", margin={"r": 0, "t": 0, "l": 0, "b": 0})
+                        st.plotly_chart(fig_map, use_container_width=True)
+                    except Exception as err_mapa:
+                        st.warning(f"No se pudo renderizar el mapa GPS: {err_mapa}")
 
             # Tabla de Vueltas / Desglose
             if not laps.empty:
                 st.subheader("⏱️ Desglose por Vueltas (Laps Registradas en el Reloj)")
-                cols_mostrar = []
-                for c in ['lap_index', 'wkt_step_name', 'intensity', 'total_elapsed_time', 'total_distance', 'avg_speed', 'avg_heart_rate', 'avg_power', 'avg_swolf']:
-                    if c in laps.columns:
-                        cols_mostrar.append(c)
                 
-                df_laps_show = laps[cols_mostrar].copy()
+                df_laps_show = pd.DataFrame()
                 
-                if 'intensity' in df_laps_show.columns:
-                   mapping_int = {0: 'Active', 1: 'Rest', 2: 'Warmup', 3: 'Cooldown'}
-                   df_laps_show['intensity'] = df_laps_show['intensity'].map(mapping_int).fillna(df_laps_show['intensity'])
+                # 1. Número de Vuelta
+                if 'lap_index' in laps.columns:
+                    df_laps_show['Vuelta'] = laps['lap_index'] + 1
+                else:
+                    df_laps_show['Vuelta'] = range(1, len(laps) + 1)
+                
+                # 2. Nombre de Fase / Paso
+                if 'wkt_step_name' in laps.columns:
+                    df_laps_show['Fase'] = laps['wkt_step_name'].fillna('-')
 
-                if 'total_distance' in df_laps_show.columns:
+                # 3. Tipo / Intensidad
+                if 'intensity' in laps.columns:
+                    mapping_int = {0: 'Trabajo', 1: 'Descanso', 2: 'Calentamiento', 3: 'Enfriamiento'}
+                    df_laps_show['Tipo'] = laps['intensity'].map(mapping_int).fillna(laps['intensity'])
+
+                # 4. Duración (convertida de segundos a MM:SS o HH:MM:SS)
+                if 'total_elapsed_time' in laps.columns:
+                    def fmt_duracion(segs):
+                        if pd.isna(segs) or segs <= 0:
+                            return "-"
+                        segs = float(segs)
+                        h = int(segs // 3600)
+                        m = int((segs % 3600) // 60)
+                        s = int(segs % 60)
+                        if h > 0:
+                            return f"{h:02d}:{m:02d}:{s:02d}"
+                        return f"{m:02d}:{s:02d}"
+                    df_laps_show['Duración'] = laps['total_elapsed_time'].apply(fmt_duracion)
+
+                # 5. Distancia (convertida a km para carrera/bici o m para natación)
+                if 'total_distance' in laps.columns:
                     if es_nat:
-                        df_laps_show['Distancia (m)'] = df_laps_show['total_distance'].round(0)
+                        df_laps_show['Distancia (m)'] = laps['total_distance'].round(0).astype(int)
                     else:
-                        df_laps_show['Distancia (km)'] = (df_laps_show['total_distance'] / 1000.0).round(2)
-                        
-                if 'avg_speed' in df_laps_show.columns:
-                    if es_nat:
-                        df_laps_show['Ritmo Medio'] = df_laps_show['avg_speed'].apply(
-                            lambda x: f"{int(1.66667/x)}:{int(((1.66667/x)%1)*60):02d}" if x > 0.05 else "-"
-                        )
-                    else:
-                        df_laps_show['Ritmo Medio'] = df_laps_show['avg_speed'].apply(
-                            lambda x: f"{int(16.6667/x)}:{int(((16.6667/x)%1)*60):02d}" if x > 0.5 else "-"
-                        )
+                        df_laps_show['Distancia (km)'] = (laps['total_distance'] / 1000.0).round(2)
+
+                # 6. Ritmo Medio (convertido de m/s a min/km o min/100m)
+                if 'avg_speed' in laps.columns:
+                    lbl_ritmo = 'Ritmo (min/100m)' if es_nat else 'Ritmo (min/km)'
+                    def fmt_pace(sp):
+                        min_v = 0.05 if es_nat else 0.5
+                        factor = 1.66667 if es_nat else 16.6667
+                        if pd.isna(sp) or sp <= min_v:
+                            return "-"
+                        p_dec = factor / sp
+                        m = int(p_dec)
+                        s = int(round((p_dec - m) * 60))
+                        if s >= 60:
+                            m += 1
+                            s = 0
+                        return f"{m}:{s:02d}"
+                    df_laps_show[lbl_ritmo] = laps['avg_speed'].apply(fmt_pace)
+
+                # 7. FC Media (ppm)
+                if 'avg_heart_rate' in laps.columns:
+                    df_laps_show['FC Media (ppm)'] = laps['avg_heart_rate'].apply(
+                        lambda x: f"{int(round(x))}" if pd.notna(x) and x > 0 else "-"
+                    )
+
+                # 8. Potencia Media (W)
+                if 'avg_power' in laps.columns:
+                    df_laps_show['Potencia (W)'] = laps['avg_power'].apply(
+                        lambda x: f"{int(round(x))}" if pd.notna(x) and x > 0 else "-"
+                    )
+
+                # 9. SWOLF (para natación)
+                if 'avg_swolf' in laps.columns:
+                    df_laps_show['SWOLF'] = laps['avg_swolf'].apply(
+                        lambda x: f"{int(round(x))}" if pd.notna(x) and x > 0 else "-"
+                    )
+
                 st.dataframe(df_laps_show, use_container_width=True)
 
         # =====================================================================
